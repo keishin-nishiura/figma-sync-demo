@@ -28,6 +28,18 @@ const cursorLayer = document.getElementById('cursor-layer');
 const selectionLayer = document.getElementById('selection-layer');
 const canvasWrap = document.getElementById('canvas-wrap');
 
+// flickering防止のON/OFFトグル。OFFにすると、自分が出した操作の確定通知が
+// 届くたびに「サーバーから届いた値」で強制的に再描画し、Figma記事で説明されている
+// 「対策なし」の状態(チラつき)をあえて再現する。
+let flickerPreventionEnabled = true;
+const flickerToggle = document.getElementById('flicker-toggle');
+const flickerToggleLabel = document.getElementById('flicker-toggle-label');
+flickerToggle.addEventListener('change', () => {
+  flickerPreventionEnabled = flickerToggle.checked;
+  flickerToggleLabel.classList.toggle('off', !flickerPreventionEnabled);
+  log('opt', `flickering防止を${flickerPreventionEnabled ? 'ON' : 'OFF'}にしました`);
+});
+
 function nextOpId() {
   state.opCounter += 1;
   return `${state.clientId ?? 'client'}-${state.opCounter}`;
@@ -87,8 +99,11 @@ function handleMessage(msg) {
       const wasPending = state.pending.has(msg.opId);
       node.properties[msg.key] = msg.value;
       state.pending.delete(msg.opId);
-      if (wasPending) {
+      if (wasPending && flickerPreventionEnabled) {
         log('confirm', `確定(再描画なし): ${msg.nodeId}.${msg.key}`);
+      } else if (wasPending) {
+        log('confirm', `確定(強制再描画): ${msg.nodeId}.${msg.key} = ${JSON.stringify(msg.value)}`);
+        renderAll();
       } else {
         log('remote', `受信: ${msg.nodeId}.${msg.key} = ${JSON.stringify(msg.value)} (from ${msg.fromClientId})`);
         renderAll();
@@ -127,8 +142,9 @@ function handleMessage(msg) {
       const wasPending = state.pending.has(msg.opId);
       node.order = msg.order;
       state.pending.delete(msg.opId);
-      log(wasPending ? 'confirm' : 'remote', `${wasPending ? '確定' : '受信'}: ${msg.nodeId} の順序 -> ${msg.order}`);
-      renderLayers();
+      const skipRepaint = wasPending && flickerPreventionEnabled;
+      log(wasPending ? 'confirm' : 'remote', `${wasPending ? (flickerPreventionEnabled ? '確定(再描画なし)' : '確定(強制再描画)') : '受信'}: ${msg.nodeId} の順序 -> ${msg.order}`);
+      if (!skipRepaint) renderLayers();
       break;
     }
     case 'node-created': {

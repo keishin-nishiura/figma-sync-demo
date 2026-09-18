@@ -48,6 +48,8 @@
   #toolbar { position: absolute; top: 10px; left: 10px; display: flex; gap: 8px; z-index: 5; align-items: center; }
   #toolbar button, #status { background: #2a2a2a; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 6px 10px; font-size: 12px; }
   #status { cursor: default; }
+  #flicker-toggle-label { display: flex; align-items: center; gap: 6px; background: #2a2a2a; border: 1px solid #444; border-radius: 6px; padding: 6px 10px; font-size: 12px; cursor: pointer; user-select: none; }
+  #flicker-toggle-label.off { border-color: #ff6b6b; color: #ff6b6b; }
   #hint { position: absolute; bottom: 10px; left: 10px; font-size: 11px; color: #888; max-width: 480px; z-index: 5; }
   #cursor-layer, #selection-layer { position: absolute; inset: 0; pointer-events: none; z-index: 4; }
   .remote-cursor { position: absolute; transform: translate(-1px, -1px); display: flex; align-items: flex-start; gap: 4px; }
@@ -63,6 +65,10 @@
     <div id="toolbar">
       <button id="add-node">+ ノード追加</button>
       <span id="status">接続中...</span>
+      <label id="flicker-toggle-label" for="flicker-toggle" title="OFFにすると、自分の操作が確定するたびに強制的に再描画してチラつきを再現します">
+        <input type="checkbox" id="flicker-toggle" checked />
+        flickering防止
+      </label>
     </div>
     <svg id="links"></svg>
     <div id="canvas"></div>
