@@ -49,7 +49,7 @@ function isDescendant(candidateId, nodeId) {
 
 let ws;
 function connect() {
-  ws = new WebSocket(`ws://${location.hostname}:8080`);
+  ws = new WebSocket(`ws://${location.host}`);
   ws.addEventListener('open', () => { statusEl.textContent = '接続済み'; });
   ws.addEventListener('close', () => { statusEl.textContent = '切断されました'; });
   ws.addEventListener('message', (ev) => handleMessage(JSON.parse(ev.data)));
