@@ -236,10 +236,14 @@ function renderCursors() {
     el.className = 'remote-cursor';
     el.style.left = `${cursor.x}px`;
     el.style.top = `${cursor.y}px`;
-    el.style.color = cursor.color;
-    el.innerHTML = `<span class="dot"></span><span class="label">${clientId}</span>`;
+    el.innerHTML = `
+      <svg class="cursor-icon" width="18" height="18" viewBox="0 0 18 18">
+        <path d="M1 1 L1 13.5 L4.5 10.5 L7 16 L9.3 15 L6.8 9.5 L12 9.2 Z" fill="${cursor.color}" stroke="white" stroke-width="1" stroke-linejoin="round" />
+      </svg>
+      <span class="label">${clientId}</span>
+    `;
     const labelEl = el.querySelector('.label');
-    if (labelEl) labelEl.style.background = cursor.color; // currentColorはlabel自身のcolor(白)を指してしまうため直接指定する
+    if (labelEl) labelEl.style.background = cursor.color;
     cursorLayer.appendChild(el);
   }
 }
