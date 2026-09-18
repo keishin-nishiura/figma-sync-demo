@@ -25,6 +25,26 @@ Figma公式ブログ（[How Figma's multiplayer technology works](https://www.fi
 npm install
 ```
 
+## ブラウザでUIを見ながら確認する (推奨)
+
+`npm run server` でサーバーを起動し、ブラウザで `http://localhost:8080` を
+**2つのタブ (または2つのウィンドウ) で開く** と、Figmaのように実際にドラッグ・
+色変更・親子関係の変更をしながら、もう片方の画面にリアルタイムで反映される様子を
+確認できます。
+
+```bash
+npm run server
+# ブラウザで http://localhost:8080 を2つのタブで開く
+```
+
+- ノードをドラッグして動かす → 楽観的更新とflickering防止(もう片方のタブにもスムーズに反映される)
+- ノードをダブルクリックして色を変える → LWW(2つのタブでほぼ同時に同じノードの色を変えると、後着の変更に収束する)
+- サイドバーの「親」プルダウンを変更する、またはノードを別のノードの上にドロップする → reparent(2つのタブで同時に逆方向のreparentを行うと、片方が循環参照として拒否され、赤く光って巻き戻る)
+- サイドバーの ↑↓ ボタンで並び替える → Fractional Indexingによる順序管理
+
+画面右側にはイベントログが流れ、「楽観的に適用」「確定(再描画なし)」「受信して反映」
+「拒否(循環参照)→巻き戻し」といったログで、裏側で何が起きているかも同時に確認できます。
+
 ## 動かし方
 
 各シナリオはサーバーの起動からクライアントの接続・操作・終了まで
@@ -47,10 +67,11 @@ npm run server
 ## 構成
 
 ```
-server/     WebSocketサーバーとドキュメントモデル (1ドキュメント=1サーバープロセス)
-client/     クライアント側の楽観的更新・確定処理を持つ DemoClient
-shared/     Fractional Indexingの実装、サーバー起動ヘルパー
-scenarios/  4つの仕組みをそれぞれ確認できるシナリオスクリプト
+server/         WebSocket/HTTPサーバーとドキュメントモデル (1ドキュメント=1サーバープロセス)
+client/         クライアント側の楽観的更新・確定処理を持つ DemoClient (Node.js用)
+client/public/  ブラウザで動くUI (index.html / app.js)。DemoClientと同じロジックをブラウザ向けに実装
+shared/         Fractional Indexingの実装、サーバー起動ヘルパー
+scenarios/      4つの仕組みをそれぞれ確認できるシナリオスクリプト
 ```
 
 ## 注意事項

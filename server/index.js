@@ -1,5 +1,6 @@
 // 1ドキュメント = 1サーバープロセスというFigmaの前提を再現した
-// 最小構成のWebSocketサーバー。
+// 最小構成のサーバー。静的ファイル配信 (ブラウザUI) と WebSocket を
+// 同じHTTPサーバー・同じポートで提供する。
 //
 // ポイント: サーバーに届いたメッセージを「届いた順」に処理してブロードキャストするだけ。
 // これが Figma記事で説明されている「サーバー到着順を利用したLWW」の正体で、
@@ -7,16 +8,51 @@
 
 import { WebSocketServer } from 'ws';
 import { randomUUID } from 'node:crypto';
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Document } from './document.js';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PUBLIC_DIR = path.join(__dirname, '..', 'client', 'public');
 const PORT = process.env.PORT || 8080;
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+};
+
+const httpServer = http.createServer((req, res) => {
+  const urlPath = req.url === '/' ? '/index.html' : req.url;
+  const filePath = path.join(PUBLIC_DIR, urlPath);
+
+  if (!filePath.startsWith(PUBLIC_DIR)) {
+    res.writeHead(403);
+    res.end('forbidden');
+    return;
+  }
+
+  fs.readFile(filePath, (err, data) => {
+    if (err) {
+      res.writeHead(404);
+      res.end('not found');
+      return;
+    }
+    const ext = path.extname(filePath);
+    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    res.end(data);
+  });
+});
+
 const doc = new Document();
 
 // デモ用に初期ノードを2つ用意 (A, B) しておく
-doc.createNode('A', 'root', { name: 'A', color: '#3b82f6', x: 0, y: 0 });
-doc.createNode('B', 'root', { name: 'B', color: '#ef4444', x: 100, y: 0 });
+doc.createNode('A', 'root', { name: 'A', color: '#3b82f6', x: 40, y: 40 });
+doc.createNode('B', 'root', { name: 'B', color: '#ef4444', x: 220, y: 40 });
 
-const wss = new WebSocketServer({ port: PORT });
+const wss = new WebSocketServer({ server: httpServer });
 
 function broadcast(message) {
   const payload = JSON.stringify(message);
@@ -53,9 +89,6 @@ wss.on('connection', (ws) => {
       case 'update-property': {
         const node = doc.applyPropertyUpdate(msg.nodeId, msg.key, msg.value);
         if (node) {
-          console.log(
-            `[server] ${clientId} -> update-property ${msg.nodeId}.${msg.key} = ${JSON.stringify(msg.value)}`
-          );
           broadcast({
             type: 'property-updated',
             nodeId: msg.nodeId,
@@ -98,7 +131,6 @@ wss.on('connection', (ws) => {
       case 'move-node': {
         const node = doc.moveNode(msg.nodeId, msg.beforeId, msg.afterId);
         if (node) {
-          console.log(`[server] ${clientId} -> move-node ${msg.nodeId} order=${node.order}`);
           broadcast({
             type: 'node-moved',
             nodeId: msg.nodeId,
@@ -127,4 +159,6 @@ wss.on('connection', (ws) => {
   });
 });
 
-console.log(`[server] listening on ws://localhost:${PORT}`);
+httpServer.listen(PORT, () => {
+  console.log(`[server] http/ws listening on http://localhost:${PORT}`);
+});
