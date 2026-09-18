@@ -10,7 +10,9 @@ const state = {
   pending: new Map(), // opId -> 巻き戻し用の情報
   opCounter: 0,
   remoteCursors: new Map(), // fromClientId -> { x, y, color }
-  remoteSelections: new Map(), // fromClientId -> { x, y, w, h, color }
+  remoteSelections: new Map(), // fromClientId -> { x, y, w, h, color } (範囲選択)
+  selectedNodeId: null, // 自分が選択中のノード
+  remoteNodeSelections: new Map(), // fromClientId -> nodeId (他クライアントが選択中のノード)
 };
 
 function colorForClient(id) {
@@ -171,6 +173,16 @@ function handleMessage(msg) {
       renderSelections();
       break;
     }
+    case 'select-node': {
+      state.remoteNodeSelections.set(msg.fromClientId, msg.nodeId);
+      renderCanvas();
+      break;
+    }
+    case 'deselect-node': {
+      state.remoteNodeSelections.delete(msg.fromClientId);
+      renderCanvas();
+      break;
+    }
     case 'selection-end': {
       state.remoteSelections.delete(msg.fromClientId);
       renderSelections();
@@ -179,8 +191,10 @@ function handleMessage(msg) {
     case 'client-left': {
       state.remoteCursors.delete(msg.clientId);
       state.remoteSelections.delete(msg.clientId);
+      state.remoteNodeSelections.delete(msg.clientId);
       renderCursors();
       renderSelections();
+      renderCanvas();
       break;
     }
     default:
@@ -306,16 +320,42 @@ function renderCanvas() {
     el.style.top = `${node.properties.y ?? 0}px`;
     el.style.background = node.properties.color ?? '#666';
     el.innerHTML = `<div>${node.properties.name ?? node.id}</div><small>parent: ${node.parentId}</small>`;
-    el.addEventListener('mousedown', (e) => startDrag(e, node.id));
-    el.addEventListener('dblclick', () => {
-      const current = node.properties.color;
-      const idx = COLORS.indexOf(current);
-      const next = COLORS[(idx + 1 + COLORS.length) % COLORS.length];
-      updateProperty(node.id, 'color', next);
+
+    if (state.selectedNodeId === node.id) {
+      el.classList.add('selected-own');
+    }
+    const selectedBy = [...state.remoteNodeSelections.entries()].find(([, nodeId]) => nodeId === node.id);
+    if (selectedBy) {
+      const [fromClientId] = selectedBy;
+      const color = colorForClient(fromClientId);
+      el.style.borderColor = color;
+      el.style.boxShadow = `0 0 0 2px ${color}`;
+      const badge = document.createElement('div');
+      badge.className = 'selected-by-badge';
+      badge.style.background = color;
+      badge.textContent = fromClientId;
+      el.appendChild(badge);
+    }
+
+    el.addEventListener('mousedown', (e) => {
+      selectNode(node.id);
+      startDrag(e, node.id);
     });
     canvas.appendChild(el);
   }
   drawLinks(allNodes);
+}
+
+function selectNode(nodeId) {
+  if (state.selectedNodeId === nodeId) return;
+  state.selectedNodeId = nodeId;
+  send({ type: 'select-node', nodeId });
+}
+
+function deselectNode() {
+  if (state.selectedNodeId === null) return;
+  state.selectedNodeId = null;
+  send({ type: 'deselect-node' });
 }
 
 function drawLinks(allNodes) {
@@ -493,6 +533,7 @@ let lastSelectionSent = 0;
 
 canvas.addEventListener('mousedown', (e) => {
   if (e.target !== canvas) return; // ノードの上でのmousedownはstartDrag側で処理する
+  deselectNode(); // 何もない場所をクリック/ドラッグしたら選択解除
   const rect = canvas.getBoundingClientRect();
   marqueeState = { startX: e.clientX - rect.left, startY: e.clientY - rect.top };
   window.addEventListener('mousemove', onMarqueeMove);

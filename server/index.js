@@ -183,6 +183,17 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      case 'select-node': {
+        // ドキュメントの状態(nodes)には保存しない。あくまで一時的なプレゼンス情報として中継するだけ。
+        broadcastExcept({ type: 'select-node', nodeId: msg.nodeId, fromClientId: clientId }, ws);
+        break;
+      }
+
+      case 'deselect-node': {
+        broadcastExcept({ type: 'deselect-node', fromClientId: clientId }, ws);
+        break;
+      }
+
       default:
         console.log(`[server] unknown message type: ${msg.type}`);
     }
