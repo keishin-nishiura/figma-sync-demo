@@ -238,6 +238,8 @@ function renderCursors() {
     el.style.top = `${cursor.y}px`;
     el.style.color = cursor.color;
     el.innerHTML = `<span class="dot"></span><span class="label">${clientId}</span>`;
+    const labelEl = el.querySelector('.label');
+    if (labelEl) labelEl.style.background = cursor.color; // currentColorはlabel自身のcolor(白)を指してしまうため直接指定する
     cursorLayer.appendChild(el);
   }
 }
