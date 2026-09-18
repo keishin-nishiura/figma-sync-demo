@@ -63,6 +63,17 @@ function broadcast(message) {
   }
 }
 
+// カーソル位置や選択範囲は「ドキュメントの状態」ではなく一時的なプレゼンス情報なので、
+// Documentには保存せず、他のクライアントへそのまま中継するだけでよい。
+function broadcastExcept(message, exceptWs) {
+  const payload = JSON.stringify(message);
+  for (const ws of wss.clients) {
+    if (ws.readyState === ws.OPEN && ws !== exceptWs) {
+      ws.send(payload);
+    }
+  }
+}
+
 function sendTo(ws, message) {
   if (ws.readyState === ws.OPEN) {
     ws.send(JSON.stringify(message));
@@ -149,6 +160,29 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      case 'cursor-move': {
+        broadcastExcept({ type: 'cursor-move', x: msg.x, y: msg.y, fromClientId: clientId }, ws);
+        break;
+      }
+
+      case 'cursor-leave': {
+        broadcastExcept({ type: 'cursor-leave', fromClientId: clientId }, ws);
+        break;
+      }
+
+      case 'selection-update': {
+        broadcastExcept(
+          { type: 'selection-update', x: msg.x, y: msg.y, w: msg.w, h: msg.h, fromClientId: clientId },
+          ws
+        );
+        break;
+      }
+
+      case 'selection-end': {
+        broadcastExcept({ type: 'selection-end', fromClientId: clientId }, ws);
+        break;
+      }
+
       default:
         console.log(`[server] unknown message type: ${msg.type}`);
     }
@@ -156,6 +190,8 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     console.log(`[server] client disconnected: ${clientId}`);
+    // カーソル/選択範囲を出しっぱなしのまま消えないよう、離脱を全員に知らせる
+    broadcast({ type: 'client-left', clientId });
   });
 });
 

@@ -9,13 +9,24 @@ const state = {
   nodes: new Map(), // id -> node
   pending: new Map(), // opId -> 巻き戻し用の情報
   opCounter: 0,
+  remoteCursors: new Map(), // fromClientId -> { x, y, color }
+  remoteSelections: new Map(), // fromClientId -> { x, y, w, h, color }
 };
+
+function colorForClient(id) {
+  let hash = 0;
+  for (const ch of id) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+  return COLORS[hash % COLORS.length];
+}
 
 const canvas = document.getElementById('canvas');
 const linksSvg = document.getElementById('links');
 const layersList = document.getElementById('layers-list');
 const logList = document.getElementById('log-list');
 const statusEl = document.getElementById('status');
+const cursorLayer = document.getElementById('cursor-layer');
+const selectionLayer = document.getElementById('selection-layer');
+const canvasWrap = document.getElementById('canvas-wrap');
 
 function nextOpId() {
   state.opCounter += 1;
@@ -126,6 +137,35 @@ function handleMessage(msg) {
       renderAll();
       break;
     }
+    case 'cursor-move': {
+      const color = colorForClient(msg.fromClientId);
+      state.remoteCursors.set(msg.fromClientId, { x: msg.x, y: msg.y, color });
+      renderCursors();
+      break;
+    }
+    case 'cursor-leave': {
+      state.remoteCursors.delete(msg.fromClientId);
+      renderCursors();
+      break;
+    }
+    case 'selection-update': {
+      const color = colorForClient(msg.fromClientId);
+      state.remoteSelections.set(msg.fromClientId, { x: msg.x, y: msg.y, w: msg.w, h: msg.h, color });
+      renderSelections();
+      break;
+    }
+    case 'selection-end': {
+      state.remoteSelections.delete(msg.fromClientId);
+      renderSelections();
+      break;
+    }
+    case 'client-left': {
+      state.remoteCursors.delete(msg.clientId);
+      state.remoteSelections.delete(msg.clientId);
+      renderCursors();
+      renderSelections();
+      break;
+    }
     default:
       break;
   }
@@ -187,6 +227,49 @@ function createNode() {
 function renderAll() {
   renderCanvas();
   renderLayers();
+}
+
+function renderCursors() {
+  cursorLayer.innerHTML = '';
+  for (const [clientId, cursor] of state.remoteCursors) {
+    const el = document.createElement('div');
+    el.className = 'remote-cursor';
+    el.style.left = `${cursor.x}px`;
+    el.style.top = `${cursor.y}px`;
+    el.style.color = cursor.color;
+    el.innerHTML = `<span class="dot"></span><span class="label">${clientId}</span>`;
+    cursorLayer.appendChild(el);
+  }
+}
+
+function renderSelections() {
+  selectionLayer.innerHTML = '';
+  for (const sel of state.remoteSelections.values()) {
+    const el = document.createElement('div');
+    el.className = 'selection-box remote';
+    el.style.left = `${sel.x}px`;
+    el.style.top = `${sel.y}px`;
+    el.style.width = `${sel.w}px`;
+    el.style.height = `${sel.h}px`;
+    el.style.color = sel.color;
+    selectionLayer.appendChild(el);
+  }
+  renderOwnSelectionBox();
+}
+
+let ownSelectionRect = null;
+function renderOwnSelectionBox() {
+  const existing = document.getElementById('own-selection-box');
+  if (existing) existing.remove();
+  if (!ownSelectionRect) return;
+  const el = document.createElement('div');
+  el.id = 'own-selection-box';
+  el.className = 'selection-box own';
+  el.style.left = `${ownSelectionRect.x}px`;
+  el.style.top = `${ownSelectionRect.y}px`;
+  el.style.width = `${ownSelectionRect.w}px`;
+  el.style.height = `${ownSelectionRect.h}px`;
+  selectionLayer.appendChild(el);
 }
 
 function renderCanvas() {
@@ -304,6 +387,7 @@ let lastSent = 0;
 
 function startDrag(e, nodeId) {
   e.preventDefault();
+  e.stopPropagation();
   const node = state.nodes.get(nodeId);
   const rect = canvas.getBoundingClientRect();
   dragState = {
@@ -361,5 +445,64 @@ function endDrag(e) {
 }
 
 document.getElementById('add-node').addEventListener('click', createNode);
+
+// ---- カーソル位置の同期 (Figmaのマルチプレイヤーカーソルの再現) ----
+
+let lastCursorSent = 0;
+canvasWrap.addEventListener('mousemove', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const x = Math.round(e.clientX - rect.left);
+  const y = Math.round(e.clientY - rect.top);
+  const now = performance.now();
+  if (now - lastCursorSent > 40) {
+    lastCursorSent = now;
+    send({ type: 'cursor-move', x, y });
+  }
+});
+canvasWrap.addEventListener('mouseleave', () => {
+  send({ type: 'cursor-leave' });
+});
+
+// ---- 範囲選択 (マーキー選択) の同期 ----
+
+let marqueeState = null;
+let lastSelectionSent = 0;
+
+canvas.addEventListener('mousedown', (e) => {
+  if (e.target !== canvas) return; // ノードの上でのmousedownはstartDrag側で処理する
+  const rect = canvas.getBoundingClientRect();
+  marqueeState = { startX: e.clientX - rect.left, startY: e.clientY - rect.top };
+  window.addEventListener('mousemove', onMarqueeMove);
+  window.addEventListener('mouseup', onMarqueeEnd);
+});
+
+function onMarqueeMove(e) {
+  if (!marqueeState) return;
+  const rect = canvas.getBoundingClientRect();
+  const curX = e.clientX - rect.left;
+  const curY = e.clientY - rect.top;
+  const x = Math.min(marqueeState.startX, curX);
+  const y = Math.min(marqueeState.startY, curY);
+  const w = Math.abs(curX - marqueeState.startX);
+  const h = Math.abs(curY - marqueeState.startY);
+  ownSelectionRect = { x, y, w, h };
+  renderOwnSelectionBox();
+
+  const now = performance.now();
+  if (now - lastSelectionSent > 40) {
+    lastSelectionSent = now;
+    send({ type: 'selection-update', x, y, w, h });
+  }
+}
+
+function onMarqueeEnd() {
+  if (!marqueeState) return;
+  marqueeState = null;
+  ownSelectionRect = null;
+  renderOwnSelectionBox();
+  send({ type: 'selection-end' });
+  window.removeEventListener('mousemove', onMarqueeMove);
+  window.removeEventListener('mouseup', onMarqueeEnd);
+}
 
 connect();

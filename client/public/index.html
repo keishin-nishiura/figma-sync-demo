@@ -49,6 +49,13 @@
   #toolbar button, #status { background: #2a2a2a; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 6px 10px; font-size: 12px; }
   #status { cursor: default; }
   #hint { position: absolute; bottom: 10px; left: 10px; font-size: 11px; color: #888; max-width: 480px; z-index: 5; }
+  #cursor-layer, #selection-layer { position: absolute; inset: 0; pointer-events: none; z-index: 4; }
+  .remote-cursor { position: absolute; transform: translate(-2px, -2px); display: flex; align-items: center; gap: 4px; }
+  .remote-cursor .dot { width: 0; height: 0; border-style: solid; border-width: 0 6px 10px 6px; border-color: transparent transparent currentColor transparent; transform: rotate(-30deg); filter: drop-shadow(0 1px 1px rgba(0,0,0,.5)); }
+  .remote-cursor .label { font-size: 10px; padding: 1px 5px; border-radius: 4px; color: #fff; background: currentColor; white-space: nowrap; }
+  .selection-box { position: absolute; border: 1.5px dashed; background: currentColor; opacity: .9; }
+  .selection-box.own { border-color: #fff; background: rgba(255,255,255,.08); }
+  .selection-box.remote { background-color: color-mix(in srgb, currentColor 15%, transparent); }
 </style>
 </head>
 <body>
@@ -59,7 +66,9 @@
     </div>
     <svg id="links"></svg>
     <div id="canvas"></div>
-    <div id="hint">ドラッグで移動 (楽観的更新) / ダブルクリックで色変更 (LWW) / 他ノードの上にドロップで親子関係変更 (循環参照は拒否されます)</div>
+    <div id="selection-layer"></div>
+    <div id="cursor-layer"></div>
+    <div id="hint">ドラッグで移動 (楽観的更新) / ダブルクリックで色変更 (LWW) / 他ノードの上にドロップで親子関係変更 (循環参照は拒否されます) / 何もない場所をドラッグすると範囲選択・カーソルも他タブに同期されます</div>
   </div>
   <div id="sidebar">
     <div id="layers"><h2>レイヤー (root配下・Fractional Index順)</h2><div id="layers-list"></div></div>
