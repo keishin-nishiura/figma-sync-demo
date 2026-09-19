@@ -323,13 +323,68 @@ function attachColumnDropZone(bodyEl, columnId) {
 }
 
 // ---- 描画 ----
+//
+// タスクカードの再描画はDOMを毎回作り直す単純な方式だが、それだけだと
+// AIや人間がタスクを別の列へ動かしたときに「瞬間移動」に見えてしまい、
+// 「何が起きたか」が伝わりにくい。そこでFLIP(First-Last-Invert-Play)手法で、
+// 再描画の前後でのカードの画面上の位置の差分を測り、逆方向にずらした状態から
+// 実際の位置へトランジションさせることで、実際にスライド移動して見えるようにする。
+
+function captureTaskRects() {
+  const rects = new Map();
+  boardEl.querySelectorAll('.task').forEach((el) => {
+    rects.set(el.dataset.nodeId, el.getBoundingClientRect());
+  });
+  return rects;
+}
+
+function playTaskTransitions(oldRects) {
+  boardEl.querySelectorAll('.task').forEach((el) => {
+    const nodeId = el.dataset.nodeId;
+    const oldRect = oldRects.get(nodeId);
+
+    if (!oldRect) {
+      // 新規に現れたタスク: フェード + 拡大しながら登場させる
+      el.classList.add('task-enter');
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => el.classList.add('task-enter-active'));
+      });
+      el.addEventListener(
+        'transitionend',
+        () => el.classList.remove('task-enter', 'task-enter-active'),
+        { once: true }
+      );
+      return;
+    }
+
+    const newRect = el.getBoundingClientRect();
+    const dx = oldRect.left - newRect.left;
+    const dy = oldRect.top - newRect.top;
+    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return; // 位置が変わっていなければ何もしない
+
+    el.style.transition = 'none';
+    el.style.transform = `translate(${dx}px, ${dy}px)`;
+    el.getBoundingClientRect(); // 強制リフローで上の指定を確定させてからトランジションに戻す
+    requestAnimationFrame(() => {
+      el.style.transition = 'transform 380ms cubic-bezier(.2,.8,.2,1)';
+      el.style.transform = '';
+    });
+    el.addEventListener(
+      'transitionend',
+      () => { el.style.transition = ''; },
+      { once: true }
+    );
+  });
+}
 
 function renderAll() {
+  const oldRects = captureTaskRects();
   boardEl.innerHTML = '';
   const columns = getChildren('root').filter((n) => n.properties?.type === 'column');
   for (const col of columns) {
     boardEl.appendChild(renderColumn(col));
   }
+  playTaskTransitions(oldRects);
 }
 
 function renderColumn(col) {
