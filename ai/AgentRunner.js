@@ -80,9 +80,14 @@ function validateAndApply(doc, action) {
 
 function describeAction(action, result) {
   switch (action.type) {
-    case 'create-node':
-      return `新しいタスク「${result.payload.node.properties?.title ?? result.payload.node.id}」を作成しました`;
+    case 'create-node': {
+      const props = result.payload.node.properties || {};
+      if (props.type === 'column') return `新しい列「${props.name ?? result.payload.node.id}」を作成しました`;
+      return `新しいタスク「${props.title ?? result.payload.node.id}」を作成しました`;
+    }
     case 'update-property':
+      if (action.key === 'priority') return `${action.nodeId} を優先(⭐)にマークしました`;
+      if (action.key === 'title') return `${action.nodeId} の名前を「${action.value}」に変更しました`;
       return `${action.nodeId} の ${action.key} を更新しました`;
     case 'reparent':
       return `${action.nodeId} を別の列に移動しました`;
@@ -118,7 +123,7 @@ export async function runAgentInstruction({ room, instruction, provider, broadca
   try {
     const snapshot = room.doc.toJSON();
     const result = await provider.proposeActions({ instruction, snapshot });
-    actions = Array.isArray(result?.actions) ? result.actions.slice(0, 8) : [];
+    actions = Array.isArray(result?.actions) ? result.actions.slice(0, 12) : [];
   } catch (err) {
     console.error('[ai] proposeActions failed:', err);
     logActivity(room, { actor: AI_CLIENT_ID, action: 'ai-error', detail: 'アクションの生成に失敗しました' });

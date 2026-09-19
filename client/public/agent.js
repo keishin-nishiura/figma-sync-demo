@@ -1,8 +1,8 @@
 // Agent Workspace (Kanban) のクライアント実装。
-// 既存の client/public/app.js と同じ考え方(WebSocket + 楽観的更新は行わず
-// 確定を待って再描画する簡易版)を、Human+AIの共同編集ボード用に実装したもの。
+// 既存の client/public/app.js と同じ考え方(WebSocket + 確定を待って再描画)を、
+// Human+AIの共同編集ボード用に実装したもの。
 // AIはサーバー側で人間と全く同じメッセージ型(node-created/property-updated/
-// reparent-applied/node-deleted)をブロードキャストしてくるため、
+// reparent-applied/node-moved/node-deleted)をブロードキャストしてくるため、
 // クライアント側はfromClientIdがAIかどうかを気にせず同じ描画パスで処理できる。
 
 const AI_CLIENT_ID = 'ai-agent';
@@ -183,7 +183,7 @@ function addPresenceRow(clientId, self, isAi, status) {
   dot.className = 'presence-dot';
   dot.style.background = colorForClient(clientId);
   const label = document.createElement('span');
-  label.textContent = isAi ? `🤖 AIエージェント${self ? '' : ''}` : `${clientId}${self ? ' (自分)' : ''}`;
+  label.textContent = isAi ? '🤖 AIエージェント' : `${clientId}${self ? ' (自分)' : ''}`;
   row.append(dot, label);
   if (isAi) {
     const statusEl2 = document.createElement('span');
@@ -219,6 +219,8 @@ function moveAiCursorTo(nodeId) {
   aiCursorEl.style.display = 'flex';
   aiCursorEl.style.left = `${rect.left + rect.width / 2 - 7}px`;
   aiCursorEl.style.top = `${rect.top - 24}px`;
+  el.classList.add('ai-focused');
+  setTimeout(() => el.classList.remove('ai-focused'), 900);
 }
 
 function hideAiCursor() {
@@ -253,19 +255,71 @@ function deleteTask(nodeId) {
   send({ type: 'delete-node', nodeId });
 }
 
-function moveTaskToColumn(nodeId, newParentId) {
-  send({ type: 'reparent', nodeId, newParentId });
-}
-
-function reorderTask(nodeId, beforeId, afterId) {
-  send({ type: 'move-node', nodeId, beforeId, afterId });
-}
-
 function addTask(columnId) {
   const title = prompt('新しいタスク名', '');
   if (!title || !title.trim()) return;
   const id = 'task-' + Math.random().toString(36).slice(2, 8);
   send({ type: 'create-node', nodeId: id, parentId: columnId, properties: { type: 'task', title: title.trim() } });
+}
+
+// ---- ドラッグ&ドロップ (タスクの列移動・並び替え) ----
+// HTML5 Drag and Drop APIを使用。ドラッグ中は「挿入位置」を示す
+// プレースホルダーをDOM上に差し込み、ドロップ時にそのプレースホルダーの
+// 前後にいるノードのidから beforeId/afterId を算出して move-node を送る。
+// 列をまたぐ場合は reparent を先に送り、続けて同じ beforeId/afterId で
+// move-node を送って位置を確定させる(サーバーは同一コネクションからの
+// メッセージを受信順に処理するため、この2通のメッセージは順序通り適用される)。
+
+let draggingNodeId = null;
+const placeholder = document.createElement('div');
+placeholder.className = 'drop-placeholder';
+
+function computeDropPosition(columnBodyEl, clientY) {
+  const taskEls = [...columnBodyEl.querySelectorAll('.task')].filter((el) => el.dataset.nodeId !== draggingNodeId);
+  let afterEl = null;
+  for (const el of taskEls) {
+    const box = el.getBoundingClientRect();
+    if (clientY < box.top + box.height / 2) { afterEl = el; break; }
+  }
+  const afterIdx = afterEl ? taskEls.indexOf(afterEl) : taskEls.length;
+  const beforeEl = afterIdx > 0 ? taskEls[afterIdx - 1] : null;
+  return {
+    beforeId: beforeEl ? beforeEl.dataset.nodeId : null,
+    afterId: afterEl ? afterEl.dataset.nodeId : null,
+    afterEl,
+  };
+}
+
+function clearDragVisuals() {
+  placeholder.remove();
+  document.querySelectorAll('.column-body.drag-over').forEach((el) => el.classList.remove('drag-over'));
+}
+
+function attachColumnDropZone(bodyEl, columnId) {
+  bodyEl.addEventListener('dragover', (e) => {
+    if (!draggingNodeId) return;
+    e.preventDefault();
+    bodyEl.classList.add('drag-over');
+    const { afterEl } = computeDropPosition(bodyEl, e.clientY);
+    if (afterEl) bodyEl.insertBefore(placeholder, afterEl);
+    else bodyEl.appendChild(placeholder);
+  });
+  bodyEl.addEventListener('dragleave', (e) => {
+    if (e.target === bodyEl) bodyEl.classList.remove('drag-over');
+  });
+  bodyEl.addEventListener('drop', (e) => {
+    e.preventDefault();
+    if (!draggingNodeId) return;
+    const nodeId = draggingNodeId;
+    const node = state.nodes.get(nodeId);
+    const { beforeId, afterId } = computeDropPosition(bodyEl, e.clientY);
+    clearDragVisuals();
+    if (!node) return;
+    if (node.parentId !== columnId) {
+      send({ type: 'reparent', nodeId, newParentId: columnId });
+    }
+    send({ type: 'move-node', nodeId, beforeId, afterId });
+  });
 }
 
 // ---- 描画 ----
@@ -274,11 +328,11 @@ function renderAll() {
   boardEl.innerHTML = '';
   const columns = getChildren('root').filter((n) => n.properties?.type === 'column');
   for (const col of columns) {
-    boardEl.appendChild(renderColumn(col, columns));
+    boardEl.appendChild(renderColumn(col));
   }
 }
 
-function renderColumn(col, allColumns) {
+function renderColumn(col) {
   const tasks = getChildren(col.id);
   const wrap = document.createElement('div');
   wrap.className = 'column';
@@ -290,26 +344,36 @@ function renderColumn(col, allColumns) {
 
   const body = document.createElement('div');
   body.className = 'column-body';
+  body.dataset.columnId = col.id;
 
-  tasks.forEach((task, idx) => {
-    body.appendChild(renderTask(task, tasks, idx, allColumns, col.id));
-  });
+  if (tasks.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'column-empty';
+    empty.textContent = 'ここにドラッグ';
+    body.appendChild(empty);
+  }
+
+  for (const task of tasks) {
+    body.appendChild(renderTask(task));
+  }
+
+  attachColumnDropZone(body, col.id);
 
   const addBtn = document.createElement('button');
-  addBtn.className = 'task-actions';
+  addBtn.className = 'add-task-btn';
   addBtn.textContent = '+ タスク追加';
-  addBtn.style.width = '100%';
-  addBtn.style.marginTop = '4px';
   addBtn.onclick = () => addTask(col.id);
 
   wrap.append(header, body, addBtn);
   return wrap;
 }
 
-function renderTask(task, siblings, idx, allColumns, currentColId) {
+function renderTask(task) {
   const el = document.createElement('div');
   el.className = 'task';
   el.dataset.nodeId = task.id;
+  el.draggable = true;
+  if (task.properties.priority === 'high') el.classList.add('priority-high');
 
   if (state.selectedNodeId === task.id) el.classList.add('selected-own');
   const selectedBy = [...state.remoteNodeSelections.entries()].find(([, nodeId]) => nodeId === task.id);
@@ -326,53 +390,40 @@ function renderTask(task, siblings, idx, allColumns, currentColId) {
   }
 
   const title = document.createElement('div');
-  title.textContent = task.properties.title ?? task.id;
+  title.className = 'task-title';
+  title.textContent = (task.properties.priority === 'high' ? '⭐ ' : '') + (task.properties.title ?? task.id);
   el.appendChild(title);
 
   const actions = document.createElement('div');
   actions.className = 'task-actions';
 
-  const otherColumns = allColumns.filter((c) => c.id !== currentColId);
-  const moveSelect = document.createElement('select');
-  const placeholder = document.createElement('option');
-  placeholder.textContent = '列を移動...';
-  placeholder.value = '';
-  moveSelect.appendChild(placeholder);
-  for (const c of otherColumns) {
-    const opt = document.createElement('option');
-    opt.value = c.id;
-    opt.textContent = `→ ${c.properties.name ?? c.id}`;
-    moveSelect.appendChild(opt);
-  }
-  moveSelect.onchange = () => {
-    if (moveSelect.value) moveTaskToColumn(task.id, moveSelect.value);
-  };
-
-  const upBtn = document.createElement('button');
-  upBtn.textContent = '↑';
-  upBtn.disabled = idx === 0;
-  upBtn.onclick = () => reorderTask(task.id, siblings[idx - 2]?.id ?? null, siblings[idx - 1]?.id ?? null);
-
-  const downBtn = document.createElement('button');
-  downBtn.textContent = '↓';
-  downBtn.disabled = idx === siblings.length - 1;
-  downBtn.onclick = () => reorderTask(task.id, siblings[idx + 1]?.id ?? null, siblings[idx + 2]?.id ?? null);
-
   const editBtn = document.createElement('button');
   editBtn.textContent = '編集';
-  editBtn.onclick = () => renameTask(task.id);
+  editBtn.onclick = (e) => { e.stopPropagation(); renameTask(task.id); };
 
   const delBtn = document.createElement('button');
   delBtn.textContent = '削除';
-  delBtn.onclick = () => deleteTask(task.id);
+  delBtn.onclick = (e) => { e.stopPropagation(); deleteTask(task.id); };
 
-  actions.append(moveSelect, upBtn, downBtn, editBtn, delBtn);
+  actions.append(editBtn, delBtn);
   el.appendChild(actions);
 
   el.addEventListener('click', (e) => {
-    if (e.target.tagName === 'BUTTON' || e.target.tagName === 'SELECT' || e.target.tagName === 'OPTION') return;
+    if (e.target.tagName === 'BUTTON') return;
     if (state.selectedNodeId === task.id) deselectNode();
     else selectNode(task.id);
+  });
+
+  el.addEventListener('dragstart', (e) => {
+    draggingNodeId = task.id;
+    el.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', task.id);
+  });
+  el.addEventListener('dragend', () => {
+    draggingNodeId = null;
+    el.classList.remove('dragging');
+    clearDragVisuals();
   });
 
   return el;

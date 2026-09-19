@@ -16,16 +16,31 @@
   #toolbar a, #toolbar button, #status { background: #2a2a2a; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 6px 10px; font-size: 12px; text-decoration: none; cursor: pointer; }
   #status { cursor: default; }
   #board { display: flex; gap: 16px; align-items: flex-start; min-height: 100%; }
-  .column { width: 240px; background: #232323; border-radius: 10px; border-top: 3px solid #666; flex-shrink: 0; }
+  .column { width: 250px; background: #232323; border-radius: 10px; border-top: 3px solid #666; flex-shrink: 0; box-shadow: 0 2px 10px rgba(0,0,0,.25); display: flex; flex-direction: column; }
   .column-header { padding: 10px 12px; font-size: 13px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
-  .column-count { font-size: 11px; color: #999; font-weight: 400; }
-  .column-body { padding: 8px; min-height: 40px; }
+  .column-count { font-size: 11px; color: #999; font-weight: 400; background: #1c1c1c; padding: 1px 7px; border-radius: 10px; }
+  .column-body { padding: 8px; min-height: 60px; flex: 1; border-radius: 6px; transition: background .12s; }
+  .column-body.drag-over { background: rgba(95,176,245,.08); outline: 1.5px dashed rgba(95,176,245,.5); outline-offset: -4px; }
+  .column-empty { font-size: 11px; color: #666; text-align: center; padding: 14px 4px; border: 1.5px dashed #3a3a3a; border-radius: 6px; }
+  .drop-placeholder { height: 6px; margin: 2px 0 6px; border-radius: 3px; background: #5fb0f5; box-shadow: 0 0 6px rgba(95,176,245,.7); }
+  .add-task-btn {
+    width: 100%; margin: 0 8px 8px; width: calc(100% - 16px); background: #2a2a2a; color: #999;
+    border: 1px dashed #444; border-radius: 6px; padding: 6px; font-size: 11px; cursor: pointer;
+  }
+  .add-task-btn:hover { color: #eee; border-color: #666; }
   .task {
     position: relative; background: #2f2f2f; border-radius: 8px; padding: 10px 10px 8px;
-    margin-bottom: 8px; font-size: 13px; border: 2px solid transparent; cursor: default;
-    transition: border-color .15s, box-shadow .15s;
+    margin-bottom: 8px; font-size: 13px; border: 2px solid transparent; cursor: grab;
+    box-shadow: 0 1px 3px rgba(0,0,0,.3);
+    transition: border-color .15s, box-shadow .15s, opacity .15s, transform .1s;
   }
+  .task:hover { transform: translateY(-1px); box-shadow: 0 3px 8px rgba(0,0,0,.35); }
+  .task.dragging { opacity: .35; cursor: grabbing; }
   .task.selected-own { border-color: #fff; box-shadow: 0 0 0 2px rgba(255,255,255,.4); }
+  .task.priority-high { border-left: 3px solid #ef4444; }
+  .task.ai-focused { animation: ai-pulse .9s ease; }
+  @keyframes ai-pulse { 0% { box-shadow: 0 0 0 0 rgba(249,115,22,.6); } 100% { box-shadow: 0 0 0 8px rgba(249,115,22,0); } }
+  .task-title { line-height: 1.4; }
   .task .selected-by-badge {
     position: absolute; top: -18px; left: -2px; font-size: 10px; padding: 1px 6px;
     border-radius: 4px 4px 4px 0; color: #fff; white-space: nowrap;
@@ -35,11 +50,13 @@
     background: #222; color: #ccc; border: 1px solid #444; border-radius: 4px;
     font-size: 11px; padding: 2px 6px; cursor: pointer;
   }
+  .task-actions button:hover { background: #333; color: #fff; }
   #ai-cursor {
     position: fixed; pointer-events: none; z-index: 50; transition: top .35s ease, left .35s ease;
     display: none; align-items: center; gap: 6px;
   }
-  #ai-cursor .dot { width: 14px; height: 14px; border-radius: 50%; background: #f97316; box-shadow: 0 0 0 3px rgba(249,115,22,.35); }
+  #ai-cursor .dot { width: 14px; height: 14px; border-radius: 50%; background: #f97316; box-shadow: 0 0 0 3px rgba(249,115,22,.35); animation: ai-dot-pulse 1.2s ease-in-out infinite; }
+  @keyframes ai-dot-pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.25); } }
   #ai-cursor .label { font-size: 11px; background: #f97316; color: #fff; padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
 
   #sidebar { width: 340px; background: #161616; border-left: 1px solid #333; display: flex; flex-direction: column; }
@@ -77,9 +94,9 @@
     <div id="presence"><h2>参加者</h2><div id="presence-list"></div></div>
     <div id="ai-box">
       <h2>AIへの指示</h2>
-      <textarea id="ai-instruction" placeholder="例: 「デモを実装する」を完了にして / 「レビューを依頼する」を追加"></textarea>
+      <textarea id="ai-instruction" placeholder="例: 「デモを実装する」を完了にして / レビュー列を追加して / 全部完了にして"></textarea>
       <div id="ai-buttons"><button id="ai-send">AIに実行させる</button></div>
-      <div id="ai-hint">Human+AIの共同編集ワークスペースです。人がドラッグ操作をしている間もAIが同じボードを操作でき、同じ同期ルール(LWW・reparentの循環参照拒否・Fractional Indexing)がAIの操作にもそのまま適用されます。AI_MODE=mock(デフォルト)ではAPIキー無しでルールベースのAIが動作します。</div>
+      <div id="ai-hint">タスクはドラッグ&ドロップで列移動・並び替えができます。AIも同じ操作(移動・並び替え・追加・削除・列作成・優先マーク・一括操作)を、人間と全く同じ検証ルールの上で実行します。試せる指示の例: 「〇〇を完了にして」「〇〇を優先にして」「レビュー列を追加して」「To Doを並び替えて」「全部完了にして」「Doneを空にして」。AI_MODE=mock(デフォルト)ではAPIキー無しでルールベースのAIが動作します。</div>
     </div>
     <div id="activity"><h2>アクティビティフィード</h2><div id="activity-list"></div></div>
   </div>

@@ -6,20 +6,28 @@ import { LLMProvider } from './LLMProvider.js';
 const API_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL = process.env.ANTHROPIC_MODEL || 'claude-3-5-haiku-20241022';
 
-const SYSTEM_PROMPT = `あなたはKanbanボード(Group/Column配下にTaskを持つツリー構造)を操作するAIエージェントです。
+const SYSTEM_PROMPT = `あなたはKanbanボード(Column配下にTaskを持つツリー構造)を操作するAIエージェントです。
 ユーザーの自然言語の指示と、現在のボードのスナップショット(JSON)を受け取り、
 実行すべきアクションの配列だけを、次のJSON形式で出力してください。他の文章は一切出力しないこと。
 
 {"actions": [
   {"type": "create-node", "parentId": "<列のid>", "properties": {"type": "task", "title": "<タイトル>"}},
+  {"type": "create-node", "parentId": "root", "properties": {"type": "column", "name": "<列名>", "color": "<hexカラー>"}},
   {"type": "update-property", "nodeId": "<id>", "key": "title", "value": "<新しい値>"},
+  {"type": "update-property", "nodeId": "<タスクid>", "key": "priority", "value": "high"},
   {"type": "reparent", "nodeId": "<タスクid>", "newParentId": "<移動先の列id>"},
+  {"type": "move-node", "nodeId": "<id>", "beforeId": "<idまたはnull>", "afterId": "<idまたはnull>"},
   {"type": "delete-node", "nodeId": "<id>"}
 ]}
 
 - 存在しないidを作らないこと(create-node以外は必ずスナップショットに存在するidを使う)。
-- アクションは多くても5件程度に収める。
-- 指示が曖昧な場合は、最も自然だと思われる1件のアクションだけを返す。`;
+- タスクの並び替えは、意図した最終順序の先頭から順に
+  {"type":"move-node","nodeId":"<id>","beforeId":"<直前に配置したid、先頭ならnull>","afterId":null}
+  を積み重ねる形で表現すること(1件ずつ列の末尾に付け直すことで、常に意図通りの順序になる)。
+- 一括操作(「全部完了にして」「Doneを空にして」など)は、対象となる全タスク分の
+  アクションを配列にまとめて返してよい(1指示あたり最大12件まで)。
+- タスクの優先度は properties.priority = "high" で表現し、UIには⭐として表示される。
+- 指示が曖昧な場合は、最も自然だと思われる少数のアクションだけを返す。`;
 
 export class AnthropicLLMProvider extends LLMProvider {
   async proposeActions({ instruction, snapshot }) {
