@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<title>Agent Workspace - figma-sync-demo</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Kaku Gothic ProN", sans-serif;
+    display: flex; height: 100vh; background: #1e1e1e; color: #eee;
+  }
+  a { color: #5fb0f5; }
+  #board-wrap { position: relative; flex: 1; overflow: auto; padding: 56px 16px 16px; }
+  #toolbar { position: absolute; top: 10px; left: 10px; right: 10px; display: flex; gap: 8px; z-index: 5; align-items: center; flex-wrap: wrap; }
+  #toolbar a, #toolbar button, #status { background: #2a2a2a; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 6px 10px; font-size: 12px; text-decoration: none; cursor: pointer; }
+  #status { cursor: default; }
+  #board { display: flex; gap: 16px; align-items: flex-start; min-height: 100%; }
+  .column { width: 240px; background: #232323; border-radius: 10px; border-top: 3px solid #666; flex-shrink: 0; }
+  .column-header { padding: 10px 12px; font-size: 13px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+  .column-count { font-size: 11px; color: #999; font-weight: 400; }
+  .column-body { padding: 8px; min-height: 40px; }
+  .task {
+    position: relative; background: #2f2f2f; border-radius: 8px; padding: 10px 10px 8px;
+    margin-bottom: 8px; font-size: 13px; border: 2px solid transparent; cursor: default;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .task.selected-own { border-color: #fff; box-shadow: 0 0 0 2px rgba(255,255,255,.4); }
+  .task .selected-by-badge {
+    position: absolute; top: -18px; left: -2px; font-size: 10px; padding: 1px 6px;
+    border-radius: 4px 4px 4px 0; color: #fff; white-space: nowrap;
+  }
+  .task-actions { display: flex; gap: 4px; margin-top: 6px; }
+  .task-actions button {
+    background: #222; color: #ccc; border: 1px solid #444; border-radius: 4px;
+    font-size: 11px; padding: 2px 6px; cursor: pointer;
+  }
+  #ai-cursor {
+    position: fixed; pointer-events: none; z-index: 50; transition: top .35s ease, left .35s ease;
+    display: none; align-items: center; gap: 6px;
+  }
+  #ai-cursor .dot { width: 14px; height: 14px; border-radius: 50%; background: #f97316; box-shadow: 0 0 0 3px rgba(249,115,22,.35); }
+  #ai-cursor .label { font-size: 11px; background: #f97316; color: #fff; padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
+
+  #sidebar { width: 340px; background: #161616; border-left: 1px solid #333; display: flex; flex-direction: column; }
+  #presence, #activity, #ai-box { padding: 12px; }
+  #presence { border-bottom: 1px solid #333; }
+  #ai-box { border-bottom: 1px solid #333; }
+  #activity { flex: 1; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11px; line-height: 1.6; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #999; margin: 0 0 10px; }
+  .presence-row { display: flex; align-items: center; gap: 6px; padding: 4px 0; font-size: 12px; }
+  .presence-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .presence-row .ai-status { color: #f97316; font-size: 11px; }
+  #ai-instruction { width: 100%; box-sizing: border-box; background: #222; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 8px; font-size: 12px; resize: vertical; min-height: 44px; }
+  #ai-buttons { display: flex; gap: 6px; margin-top: 6px; }
+  #ai-buttons button { flex: 1; background: #2a2a2a; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 6px; font-size: 12px; cursor: pointer; }
+  #ai-buttons button:disabled { opacity: .5; cursor: default; }
+  #ai-hint { font-size: 11px; color: #888; margin-top: 6px; line-height: 1.5; }
+  .log-line.opt { color: #e8c547; }
+  .log-line.confirm { color: #5fd97f; }
+  .log-line.remote { color: #5fb0f5; }
+  .log-line.reject { color: #ff6b6b; }
+  .log-line.ai { color: #f97316; }
+</style>
+</head>
+<body>
+  <div id="board-wrap">
+    <div id="toolbar">
+      <a href="index.html">← 通常デモに戻る</a>
+      <span id="status">接続中...</span>
+      <button id="seed-btn">デモデータ再投入</button>
+    </div>
+    <div id="board"></div>
+  </div>
+  <div id="ai-cursor"><div class="dot"></div><div class="label">AI</div></div>
+  <div id="sidebar">
+    <div id="presence"><h2>参加者</h2><div id="presence-list"></div></div>
+    <div id="ai-box">
+      <h2>AIへの指示</h2>
+      <textarea id="ai-instruction" placeholder="例: 「デモを実装する」を完了にして / 「レビューを依頼する」を追加"></textarea>
+      <div id="ai-buttons"><button id="ai-send">AIに実行させる</button></div>
+      <div id="ai-hint">Human+AIの共同編集ワークスペースです。人がドラッグ操作をしている間もAIが同じボードを操作でき、同じ同期ルール(LWW・reparentの循環参照拒否・Fractional Indexing)がAIの操作にもそのまま適用されます。AI_MODE=mock(デフォルト)ではAPIキー無しでルールベースのAIが動作します。</div>
+    </div>
+    <div id="activity"><h2>アクティビティフィード</h2><div id="activity-list"></div></div>
+  </div>
+  <script src="agent.js"></script>
+</body>
+</html>
