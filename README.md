@@ -84,10 +84,11 @@ npm run server
 server/         WebSocket/HTTPサーバーとドキュメントモデル (1ドキュメント=1サーバープロセス)
 client/         クライアント側の楽観的更新・確定処理を持つ DemoClient (Node.js用)
 client/public/  ブラウザで動くUI (index.html / app.js)。DemoClientと同じロジックをブラウザ向けに実装
-                (agent.html / agent.js は下記のAI Agent Workspace用のUI)
+                (agent.html/agent.js・auction.html/auction.js・paint.html/paint.js は
+                 それぞれAgent Workspace・オークション・ピクセルキャンバスのUI)
 shared/         Fractional Indexingの実装、サーバー起動ヘルパー
 scenarios/      4つの仕組みをそれぞれ確認できるシナリオスクリプト
-ai/             AI Agent Workspace用のLLMプロバイダー抽象化とAgentRunner
+ai/             LLMプロバイダー抽象化とAgentRunner (Kanban/オークション/ペイント共通)
 ```
 
 ## AI Agent Workspace (おまけ機能)
@@ -220,6 +221,42 @@ AIが人間と同じ操作の幅を持てることを一通り確認できます
 - ドラッグ&ドロップ操作が送る reparent → move-node の2段階メッセージが、
   正しい挿入位置に収束すること
 - `AI_MODE=mock`(APIキー無し)で全ての機能が動作すること
+
+## その他のおまけ: 同じ仕組みを別の題材で試す
+
+「Human+AIが同じ操作パイプラインを共有する」というAgent Workspaceのアイデアを、
+全く違う題材でも試してみた2つのおまけです。いずれもサーバー側は既存の
+`update-property`/`select-node`/`cursor-move`などをそのまま使い回しており、
+このデモ専用の同期ロジックはほとんど追加していません。
+
+### 🔨 オークションデモ (`auction.html`)
+
+複数人+AIが同じ商品に同時入札するデモです。入札は `bid: { amount, bidder, at }`
+という1つのプロパティへの`update-property`(=LWW)でしかなく、**金額の大小は
+一切チェックしていません**。本編で「チラつき防止」として説明した仕組みと
+全く同じものですが、題材を「競り合い」に変えるだけで受け取る印象が
+大きく変わることを見せています。「1円で強引に入札」ボタンで、この
+ナイーブな実装の弱点(=本来オークションには使えない)を体感できます。
+
+```bash
+npm run server
+# ブラウザで http://localhost:8080/auction.html を開く
+```
+
+### 🎨 ピクセルキャンバスデモ (`paint.html`)
+
+マス目1つ=ノード1つ、色=プロパティとして、複数人+AIで塗り合うキャンバスです。
+既存の`update-property`(色の変更)・`select-node`/`deselect-node`(誰がどの
+マスを触っているか)・`cursor-move`(誰がどこにいるか)をそのまま使い回して
+おり、サーバー側の新規実装はほぼありません。AIに「左上を青で塗って」
+「全部を緑で塗って」のように指示すると、対象範囲を判定して塗ります。
+セル数が多い指示は、`ai/AgentRunner.js`側の判断で演出を省いた高速モードに
+自動的に切り替わります。
+
+```bash
+npm run server
+# ブラウザで http://localhost:8080/paint.html を開く
+```
 
 ## 注意事項
 

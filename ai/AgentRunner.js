@@ -2,11 +2,21 @@ import { randomUUID } from 'node:crypto';
 
 export const AI_CLIENT_ID = 'ai-agent';
 
-const STEP_DELAY_MIN_MS = 300;
-const STEP_DELAY_MAX_MS = 700;
+// 少数(Kanbanのタスク数件など)のアクションは、カーソル移動→選択→適用→
+// 選択解除、という「演出込み」のペースで1件ずつ見せる。
+// ピクセルキャンバスを塗りつぶすような大量アクションでこの演出をそのまま
+// 使うと、100件を演出しながら実行するのに1分近くかかってしまい、逆に
+// 「AIが何をしているか分かりにくい」体験になってしまう。そこで件数が
+// 閾値を超えた場合は、カーソル演出を省略した高速ペースに切り替える。
+// (=見せ方の最適なペースは「操作の粒度」によって変わる、という判断)
+const CINEMATIC_STEP_DELAY_MIN_MS = 300;
+const CINEMATIC_STEP_DELAY_MAX_MS = 700;
+const FAST_BATCH_THRESHOLD = 8;
+const FAST_STEP_DELAY_MS = 30;
+const MAX_ACTIONS_PER_INSTRUCTION = 250;
 
 function randDelay() {
-  return STEP_DELAY_MIN_MS + Math.random() * (STEP_DELAY_MAX_MS - STEP_DELAY_MIN_MS);
+  return CINEMATIC_STEP_DELAY_MIN_MS + Math.random() * (CINEMATIC_STEP_DELAY_MAX_MS - CINEMATIC_STEP_DELAY_MIN_MS);
 }
 
 function sleep(ms) {
@@ -123,7 +133,7 @@ export async function runAgentInstruction({ room, instruction, provider, broadca
   try {
     const snapshot = room.doc.toJSON();
     const result = await provider.proposeActions({ instruction, snapshot });
-    actions = Array.isArray(result?.actions) ? result.actions.slice(0, 12) : [];
+    actions = Array.isArray(result?.actions) ? result.actions.slice(0, MAX_ACTIONS_PER_INSTRUCTION) : [];
   } catch (err) {
     console.error('[ai] proposeActions failed:', err);
     logActivity(room, { actor: AI_CLIENT_ID, action: 'ai-error', detail: 'アクションの生成に失敗しました' });
@@ -139,10 +149,21 @@ export async function runAgentInstruction({ room, instruction, provider, broadca
   room.aiStatus = 'acting';
   broadcast(room, { type: 'ai-status', status: 'acting' });
 
+  const isFastBatch = actions.length > FAST_BATCH_THRESHOLD;
+  if (isFastBatch) {
+    logActivity(room, {
+      actor: AI_CLIENT_ID,
+      action: 'ai-fast-batch',
+      detail: `${actions.length}件を一括処理します(演出を省略して高速に適用します)`,
+    });
+  }
+
+  let rejectedCount = 0;
   for (const action of actions) {
     const targetNodeId = action.nodeId ?? null;
+    const showCinematic = !isFastBatch && targetNodeId && room.doc.nodes.has(targetNodeId);
 
-    if (targetNodeId && room.doc.nodes.has(targetNodeId)) {
+    if (showCinematic) {
       broadcast(room, { type: 'ai-cursor', nodeId: targetNodeId });
       await sleep(randDelay());
       broadcast(room, { type: 'select-node', nodeId: targetNodeId, fromClientId: AI_CLIENT_ID });
@@ -154,20 +175,35 @@ export async function runAgentInstruction({ room, instruction, provider, broadca
 
     if (result.ok) {
       broadcast(room, { type: result.broadcastType, ...result.payload, opId, fromClientId: AI_CLIENT_ID });
-      logActivity(room, { actor: AI_CLIENT_ID, action: action.type, detail: describeAction(action, result) });
+      // 高速バッチ中は1件ごとのログでフィードを埋め尽くさないよう、要約のみ後でまとめて出す
+      if (!isFastBatch) {
+        logActivity(room, { actor: AI_CLIENT_ID, action: action.type, detail: describeAction(action, result) });
+      }
     } else {
-      logActivity(room, {
-        actor: AI_CLIENT_ID,
-        action: `${action.type || 'unknown'}-rejected`,
-        detail: `拒否: ${result.reason}`,
-      });
+      rejectedCount += 1;
+      if (!isFastBatch) {
+        logActivity(room, {
+          actor: AI_CLIENT_ID,
+          action: `${action.type || 'unknown'}-rejected`,
+          detail: `拒否: ${result.reason}`,
+        });
+      }
     }
 
-    if (targetNodeId && room.doc.nodes.has(targetNodeId)) {
+    if (showCinematic) {
       await sleep(300);
       broadcast(room, { type: 'deselect-node', fromClientId: AI_CLIENT_ID });
     }
-    await sleep(randDelay());
+    await sleep(isFastBatch ? FAST_STEP_DELAY_MS : randDelay());
+  }
+
+  if (isFastBatch) {
+    const appliedCount = actions.length - rejectedCount;
+    logActivity(room, {
+      actor: AI_CLIENT_ID,
+      action: 'ai-fast-batch-done',
+      detail: `一括処理が完了しました(適用 ${appliedCount}件 / 拒否 ${rejectedCount}件)`,
+    });
   }
 
   room.aiStatus = 'idle';

@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<title>Auction Demo - figma-sync-demo</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Kaku Gothic ProN", sans-serif;
+    display: flex; height: 100vh; background: #1e1e1e; color: #eee;
+  }
+  a { color: #5fb0f5; }
+  #main-wrap { position: relative; flex: 1; overflow: auto; padding: 56px 16px 16px; }
+  #toolbar { position: absolute; top: 10px; left: 10px; right: 10px; display: flex; gap: 8px; z-index: 5; align-items: center; flex-wrap: wrap; }
+  #toolbar a, #toolbar button, #status { background: #2a2a2a; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 6px 10px; font-size: 12px; text-decoration: none; cursor: pointer; }
+  #status { cursor: default; }
+  #warning {
+    background: #3a2a12; border: 1px solid #eab308; color: #f2d477; border-radius: 8px;
+    padding: 10px 14px; font-size: 12px; line-height: 1.6; margin-bottom: 16px; max-width: 700px;
+  }
+  #items { display: flex; gap: 16px; flex-wrap: wrap; }
+  .item-card {
+    width: 260px; background: #232323; border-radius: 10px; padding: 16px;
+    box-shadow: 0 2px 10px rgba(0,0,0,.25); transition: box-shadow .2s, transform .2s;
+  }
+  .item-card.flash { animation: item-flash .6s ease; }
+  @keyframes item-flash { 0% { box-shadow: 0 0 0 0 rgba(95,176,245,.6); } 100% { box-shadow: 0 0 0 14px rgba(95,176,245,0); } }
+  .item-name { font-size: 15px; font-weight: 600; margin-bottom: 10px; }
+  .item-bid-amount { font-size: 26px; font-weight: 700; color: #5fd97f; }
+  .item-bid-bidder { font-size: 11px; color: #999; margin-top: 2px; min-height: 14px; }
+  .item-bid-bidder.mine { color: #5fb0f5; }
+  .item-actions { display: flex; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
+  .item-actions button {
+    background: #2a2a2a; color: #eee; border: 1px solid #444; border-radius: 6px;
+    padding: 5px 9px; font-size: 11px; cursor: pointer;
+  }
+  .item-actions button:hover { background: #333; }
+  .item-actions .lowball { border-color: #ef4444; color: #ff8a8a; }
+  .item-custom { display: flex; gap: 6px; margin-top: 8px; }
+  .item-custom input {
+    width: 90px; background: #1c1c1c; color: #eee; border: 1px solid #444; border-radius: 6px;
+    padding: 5px 8px; font-size: 12px;
+  }
+
+  #toast-layer { position: fixed; top: 16px; right: 16px; z-index: 60; display: flex; flex-direction: column; gap: 8px; }
+  .toast {
+    background: #3a1414; border: 1px solid #ef4444; color: #ffb3b3; border-radius: 8px;
+    padding: 8px 14px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.4);
+    animation: toast-in .25s ease, toast-out .4s ease 3.2s forwards;
+  }
+  @keyframes toast-in { from { transform: translateX(20px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+  @keyframes toast-out { to { transform: translateX(20px); opacity: 0; } }
+
+  #sidebar { width: 340px; background: #161616; border-left: 1px solid #333; display: flex; flex-direction: column; }
+  #presence, #activity, #ai-box { padding: 12px; }
+  #presence { border-bottom: 1px solid #333; }
+  #ai-box { border-bottom: 1px solid #333; }
+  #activity { flex: 1; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11px; line-height: 1.6; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #999; margin: 0 0 10px; }
+  .presence-row { display: flex; align-items: center; gap: 6px; padding: 4px 0; font-size: 12px; }
+  .presence-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .presence-row .ai-status { color: #f97316; font-size: 11px; }
+  #ai-instruction { width: 100%; box-sizing: border-box; background: #222; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 8px; font-size: 12px; resize: vertical; min-height: 44px; }
+  #ai-buttons { display: flex; gap: 6px; margin-top: 6px; }
+  #ai-buttons button { flex: 1; background: #2a2a2a; color: #eee; border: 1px solid #444; border-radius: 6px; padding: 6px; font-size: 12px; cursor: pointer; }
+  #ai-hint { font-size: 11px; color: #888; margin-top: 6px; line-height: 1.5; }
+  .log-line.opt { color: #e8c547; }
+  .log-line.confirm { color: #5fd97f; }
+  .log-line.remote { color: #5fb0f5; }
+  .log-line.reject { color: #ff6b6b; }
+  .log-line.ai { color: #f97316; }
+</style>
+</head>
+<body>
+  <div id="main-wrap">
+    <div id="toolbar">
+      <a href="index.html">← 通常デモに戻る</a>
+      <a href="agent.html">🤖 Agent Workspace</a>
+      <a href="paint.html">🎨 ピクセルキャンバス</a>
+      <span id="status">接続中...</span>
+      <button id="seed-btn">リセット</button>
+    </div>
+    <div id="warning">
+      ⚠️ このデモは「最後にサーバーへ届いた入札がそのまま採用される(LWW)」だけの
+      素朴な実装です。<b>金額の大小は一切チェックしていません。</b>
+      本編の「チラつき防止」と全く同じ仕組みを、あえて競り合いという
+      ドラマチックな題材に変えて見せています。「1円で強引に入札」を押すと、
+      どんなに高い入札があっても一瞬で上書きされる様子を確認できます。
+    </div>
+    <div id="items"></div>
+  </div>
+  <div id="toast-layer"></div>
+  <div id="sidebar">
+    <div id="presence"><h2>参加者</h2><div id="presence-list"></div></div>
+    <div id="ai-box">
+      <h2>AIへの指示</h2>
+      <textarea id="ai-instruction" placeholder="例: アンティーク時計に5000円で入札して"></textarea>
+      <div id="ai-buttons"><button id="ai-send">AIに実行させる</button></div>
+      <div id="ai-hint">AIも人間と同じ update-property(bid) を送るだけの1クライアントです。金額の大小に関わらず、最後に届いた入札が勝ちます。</div>
+    </div>
+    <div id="activity"><h2>アクティビティフィード</h2><div id="activity-list"></div></div>
+  </div>
+  <script src="auction.js"></script>
+</body>
+</html>
