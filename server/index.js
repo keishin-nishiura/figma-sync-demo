@@ -173,6 +173,12 @@ function hasAi(room) {
   return room !== rooms.canvas;
 }
 
+/** ボード割合座標用: 有限数値なら 0〜1 に丸め、それ以外は null */
+function clampUnitInterval(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  return Math.min(1, Math.max(0, value));
+}
+
 function presenceList(room) {
   const list = [...room.clients.values()].map((c) => ({ clientId: c.clientId }));
   if (hasAi(room)) {
@@ -282,7 +288,11 @@ wss.on('connection', (ws, req) => {
         if (!msg.nodeId || !room.doc.nodes.has(msg.nodeId)) break;
         const meta = room.clients.get(ws);
         if (meta) meta.draggingNodeId = msg.nodeId;
-        broadcastExcept(room, { type: 'drag-start', nodeId: msg.nodeId, fromClientId: clientId }, ws);
+        const startPayload = { type: 'drag-start', nodeId: msg.nodeId, fromClientId: clientId };
+        // 掴み位置オフセット(px)。他人画面で同じ軌跡にゴーストを置くために中継する。
+        if (typeof msg.ox === 'number' && Number.isFinite(msg.ox)) startPayload.ox = msg.ox;
+        if (typeof msg.oy === 'number' && Number.isFinite(msg.oy)) startPayload.oy = msg.oy;
+        broadcastExcept(room, startPayload, ws);
         break;
       }
       case 'drag-hover': {
@@ -290,13 +300,21 @@ wss.on('connection', (ws, req) => {
         if (!msg.columnId || !room.doc.nodes.has(msg.columnId)) break;
         const beforeId = msg.beforeId ?? null;
         if (beforeId != null && !room.doc.nodes.has(beforeId)) break;
-        broadcastExcept(room, {
+        const payload = {
           type: 'drag-hover',
           nodeId: msg.nodeId,
           columnId: msg.columnId,
           beforeId,
           fromClientId: clientId,
-        }, ws);
+        };
+        // ボード上のポインタ位置(0〜1)。数値でなければ省略、範囲外は丸める。
+        const bx = clampUnitInterval(msg.bx);
+        const by = clampUnitInterval(msg.by);
+        if (bx != null && by != null) {
+          payload.bx = bx;
+          payload.by = by;
+        }
+        broadcastExcept(room, payload, ws);
         break;
       }
       case 'drag-end': {
