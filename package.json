@@ -9,7 +9,8 @@
     "scenario:lww": "node scenarios/01-lww-property-sync.js",
     "scenario:optimistic": "node scenarios/02-optimistic-update-flicker.js",
     "scenario:reparent": "node scenarios/03-reparent-cycle-conflict.js",
-    "scenario:fractional-index": "node scenarios/04-fractional-index-reorder.js"
+    "scenario:fractional-index": "node scenarios/04-fractional-index-reorder.js",
+    "scenario:drag-presence": "node scenarios/05-agent-drag-presence.js"
   },
   "license": "MIT",
   "dependencies": {
