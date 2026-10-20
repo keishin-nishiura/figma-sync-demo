@@ -7,13 +7,22 @@
 //
 // ドラッグ中の「運んでいる途中」描写は Document ではなくプレゼンス
 // (drag-start / drag-hover / drag-end)として扱い、サーバーは中継するだけ。
+// 本人・他人・AIで同じゴースト/プレースホルダー部品を使い、見た目と動きを揃える。
 
 const AI_CLIENT_ID = 'ai-agent';
 const AI_COLOR = '#f97316';
 const COLORS = ['#3b82f6', '#ef4444', '#22c55e', '#eab308', '#a855f7', '#ec4899'];
-const DRAG_HOVER_MIN_INTERVAL_MS = 50;
+const DRAG_HOVER_MIN_INTERVAL_MS = 40;
+const DRAG_END_GRACE_MS = 100;
+const AI_INTERPOLATE_MS = 450;
+const GHOST_RETURN_MS = 220;
 const prefersReducedMotion = () =>
   typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// ブラウザ標準のドラッグ画像を消すための 1x1 透明 GIF
+const TRANSPARENT_DRAG_IMAGE = new Image();
+TRANSPARENT_DRAG_IMAGE.src =
+  'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 
 function colorForClient(id) {
   if (id === AI_CLIENT_ID) return AI_COLOR;
@@ -34,9 +43,10 @@ const state = {
   selectedNodeId: null,
   remoteNodeSelections: new Map(), // fromClientId -> nodeId
   remoteCursors: new Map(), // fromClientId -> { x, y, color }
-  // fromClientId -> { nodeId, columnId, beforeId }
-  // beforeId = 挿入位置の直後のカードID(末尾なら null)。Documentのmove-node.beforeIdとは別意味。
-  remoteDrags: new Map(),
+  // clientId -> ドラッグ中状態(自分・他人・AI共通)
+  // { nodeId, columnId, beforeId, bx, by, grabOffsetX, grabOffsetY,
+  //   originLeft, originTop, originWidth, confirmed, endingTimer, anim }
+  activeDrags: new Map(),
   aiStatus: 'idle',
 };
 
@@ -90,9 +100,8 @@ function handleMessage(msg) {
     case 'board-reset': {
       loadDocument(msg.document);
       state.remoteNodeSelections.clear();
-      state.remoteDrags.clear();
+      clearAllDrags();
       state.selectedNodeId = null;
-      clearAllDragGhosts();
       renderAll();
       break;
     }
@@ -113,8 +122,8 @@ function handleMessage(msg) {
       if (!node) break;
       node.parentId = msg.newParentId;
       node.order = msg.order;
-      // 確定が先に届いた場合はゴーストを消し、FLIPの着地に任せる
-      clearRemoteDragForNode(msg.nodeId, msg.fromClientId);
+      // 確定 → ゴーストは即消し、FLIPの着地に任せる
+      confirmDragForNode(msg.nodeId, msg.fromClientId);
       renderAll();
       break;
     }
@@ -122,7 +131,7 @@ function handleMessage(msg) {
       const node = state.nodes.get(msg.nodeId);
       if (!node) break;
       node.order = msg.order;
-      clearRemoteDragForNode(msg.nodeId, msg.fromClientId);
+      confirmDragForNode(msg.nodeId, msg.fromClientId);
       renderAll();
       break;
     }
@@ -131,8 +140,8 @@ function handleMessage(msg) {
       state.remoteNodeSelections.forEach((nodeId, clientId) => {
         if (nodeId === msg.nodeId) state.remoteNodeSelections.delete(clientId);
       });
-      for (const [clientId, drag] of [...state.remoteDrags]) {
-        if (drag.nodeId === msg.nodeId) endRemoteDrag(clientId);
+      for (const [clientId, drag] of [...state.activeDrags]) {
+        if (drag.nodeId === msg.nodeId) clearDrag(clientId);
       }
       renderAll();
       break;
@@ -161,18 +170,28 @@ function handleMessage(msg) {
     case 'drag-start': {
       if (msg.fromClientId === state.clientId) break;
       if (!state.nodes.has(msg.nodeId)) break;
-      beginRemoteDrag(msg.fromClientId, msg.nodeId);
+      beginDrag(msg.fromClientId, msg.nodeId, {
+        follow: false,
+        grabOffsetX: typeof msg.ox === 'number' ? msg.ox : 0,
+        grabOffsetY: typeof msg.oy === 'number' ? msg.oy : 0,
+      });
       break;
     }
     case 'drag-hover': {
       if (msg.fromClientId === state.clientId) break;
       if (!state.nodes.has(msg.nodeId)) break;
-      updateRemoteDragHover(msg.fromClientId, msg.nodeId, msg.columnId, msg.beforeId ?? null);
+      updateDragHover(msg.fromClientId, {
+        nodeId: msg.nodeId,
+        columnId: msg.columnId,
+        beforeId: msg.beforeId ?? null,
+        bx: typeof msg.bx === 'number' ? msg.bx : null,
+        by: typeof msg.by === 'number' ? msg.by : null,
+      });
       break;
     }
     case 'drag-end': {
       if (msg.fromClientId === state.clientId) break;
-      endRemoteDrag(msg.fromClientId);
+      endDragWithGrace(msg.fromClientId);
       break;
     }
     case 'ai-cursor': {
@@ -194,7 +213,7 @@ function handleMessage(msg) {
       state.presence.delete(msg.clientId);
       state.remoteNodeSelections.delete(msg.clientId);
       state.remoteCursors.delete(msg.clientId);
-      endRemoteDrag(msg.clientId);
+      clearDrag(msg.clientId);
       renderPresence();
       renderCursors();
       renderAll();
@@ -273,9 +292,7 @@ function moveAiCursorTo(nodeId) {
   const el = document.querySelector(`[data-node-id="${nodeId}"]`);
   if (!el) return;
   const rect = el.getBoundingClientRect();
-  aiCursorEl.style.display = 'flex';
-  aiCursorEl.style.left = `${rect.left + rect.width / 2 - 7}px`;
-  aiCursorEl.style.top = `${rect.top - 24}px`;
+  moveAiCursorToPoint(rect.left + rect.width / 2 - 7, rect.top - 24);
   el.classList.add('ai-focused');
   setTimeout(() => el.classList.remove('ai-focused'), 900);
 }
@@ -344,29 +361,45 @@ function addTask(columnId) {
   send({ type: 'create-node', nodeId: id, parentId: columnId, properties: { type: 'task', title: title.trim() } });
 }
 
-// ---- ドラッグ&ドロップ (タスクの列移動・並び替え) ----
-// HTML5 Drag and Drop APIを使用。ドラッグ中は「挿入位置」を示す
-// プレースホルダーをDOM上に差し込み、ドロップ時にそのプレースホルダーの
-// 前後にいるノードのidから beforeId/afterId を算出して move-node を送る。
-// 列をまたぐ場合は reparent を先に送り、続けて同じ beforeId/afterId で
-// move-node を送って位置を確定させる(サーバーは同一コネクションからの
-// メッセージを受信順に処理するため、この2通のメッセージは順序通り適用される)。
-//
-// 加えて、他クライアント向けに drag-start / drag-hover / drag-end を
-// プレゼンスとして送り、「運んでいる途中」を共有する。HTML5 DnD中は
-// mousemove が発火しないため、dragover 内で cursor-move も送る。
+// ---- ボード座標 ----
+
+function pointerToBoardRatio(clientX, clientY) {
+  const rect = boardEl.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return { bx: 0.5, by: 0.5 };
+  return {
+    bx: (clientX - rect.left) / rect.width,
+    by: (clientY - rect.top) / rect.height,
+  };
+}
+
+function boardRatioToClient(bx, by) {
+  const rect = boardEl.getBoundingClientRect();
+  return {
+    x: rect.left + bx * rect.width,
+    y: rect.top + by * rect.height,
+  };
+}
+
+// ---- ドラッグ&ドロップ + 共通ゴースト描画 ----
+// HTML5 DnDで確定(reparent/move-node)を送りつつ、本人・他人とも同じ
+// ゴースト/プレースホルダー/挿入ギャップで「運んでいる途中」を描く。
+// ポインタ軌跡は drag-hover の bx/by(ボード割合)で共有する。
 
 let draggingNodeId = null;
+let localDropSucceeded = false;
 let lastDragHoverKey = null;
 let lastDragHoverSentAt = 0;
 let pendingDragHover = null;
 let pendingDragHoverTimer = null;
-const placeholder = document.createElement('div');
-placeholder.className = 'drop-placeholder';
+let lastPointer = { x: 0, y: 0 };
 
 function computeDropPosition(columnBodyEl, clientY, excludeNodeId) {
   const skipId = excludeNodeId ?? draggingNodeId;
-  const taskEls = [...columnBodyEl.querySelectorAll('.task')].filter((el) => el.dataset.nodeId !== skipId);
+  const taskEls = [...columnBodyEl.querySelectorAll('.task')].filter((el) => {
+    if (el.dataset.nodeId === skipId) return false;
+    // プレースホルダー化されたソースもスキップ(同じnodeId)
+    return true;
+  });
   let afterEl = null;
   for (const el of taskEls) {
     const box = el.getBoundingClientRect();
@@ -381,73 +414,92 @@ function computeDropPosition(columnBodyEl, clientY, excludeNodeId) {
   };
 }
 
-function clearDragVisuals() {
-  placeholder.remove();
-  document.querySelectorAll('.column-body.drag-over').forEach((el) => el.classList.remove('drag-over'));
-}
-
 function sendCursorAt(clientX, clientY) {
   send({ type: 'cursor-move', x: Math.round(clientX), y: Math.round(clientY) });
 }
 
-function flushDragHover(columnId, insertBeforeId) {
-  if (!draggingNodeId) return;
-  const key = `${draggingNodeId}|${columnId}|${insertBeforeId ?? ''}`;
-  if (key === lastDragHoverKey) return;
+function flushDragHover() {
+  if (!draggingNodeId || !pendingDragHover) return;
+  const { columnId, insertBeforeId, bx, by } = pendingDragHover;
+  const key = `${draggingNodeId}|${columnId}|${insertBeforeId ?? ''}|${bx.toFixed(3)}|${by.toFixed(3)}`;
+  if (key === lastDragHoverKey) {
+    pendingDragHover = null;
+    return;
+  }
   lastDragHoverKey = key;
   lastDragHoverSentAt = performance.now();
-  pendingDragHover = null;
-  send({
+  const payload = {
     type: 'drag-hover',
     nodeId: draggingNodeId,
     columnId,
     beforeId: insertBeforeId,
-  });
+    bx,
+    by,
+  };
+  pendingDragHover = null;
+  send(payload);
 }
 
-function maybeSendDragHover(columnId, insertBeforeId) {
-  const key = `${draggingNodeId}|${columnId}|${insertBeforeId ?? ''}`;
-  if (key === lastDragHoverKey) return; // 挿入位置が変わっていない
+function maybeSendDragHover(columnId, insertBeforeId, bx, by) {
+  pendingDragHover = { columnId, insertBeforeId, bx, by };
+  const key = `${draggingNodeId}|${columnId}|${insertBeforeId ?? ''}|${bx.toFixed(3)}|${by.toFixed(3)}`;
+  if (key === lastDragHoverKey) return;
   const now = performance.now();
   const wait = DRAG_HOVER_MIN_INTERVAL_MS - (now - lastDragHoverSentAt);
   if (wait > 0) {
-    // スロットル中でも最終位置は取りこぼさない
-    pendingDragHover = { columnId, insertBeforeId };
     if (!pendingDragHoverTimer) {
       pendingDragHoverTimer = setTimeout(() => {
         pendingDragHoverTimer = null;
-        if (pendingDragHover) flushDragHover(pendingDragHover.columnId, pendingDragHover.insertBeforeId);
+        flushDragHover();
       }, wait);
     }
     return;
   }
-  flushDragHover(columnId, insertBeforeId);
+  flushDragHover();
+}
+
+function updateLocalDragFromPointer(clientX, clientY, columnId, insertBeforeId) {
+  lastPointer = { x: clientX, y: clientY };
+  const drag = state.activeDrags.get(state.clientId);
+  if (!drag) return;
+  const gapChanged = columnId != null
+    && (drag.columnId !== columnId || drag.beforeId !== insertBeforeId);
+  if (columnId != null) {
+    drag.columnId = columnId;
+    drag.beforeId = insertBeforeId;
+  }
+  const { bx, by } = pointerToBoardRatio(clientX, clientY);
+  drag.bx = bx;
+  drag.by = by;
+  positionGhostAtPointer(state.clientId, clientX, clientY);
+  if (gapChanged) applyDragVisuals({ animateFlip: true });
+  if (drag.columnId) {
+    maybeSendDragHover(drag.columnId, drag.beforeId, bx, by);
+  }
+  sendCursorAt(clientX, clientY);
 }
 
 function attachColumnDropZone(bodyEl, columnId) {
   bodyEl.addEventListener('dragover', (e) => {
     if (!draggingNodeId) return;
     e.preventDefault();
+    e.stopPropagation();
     bodyEl.classList.add('drag-over');
-    const { afterEl, afterId } = computeDropPosition(bodyEl, e.clientY);
-    if (afterEl) bodyEl.insertBefore(placeholder, afterEl);
-    else bodyEl.appendChild(placeholder);
-    // プレゼンス: 挿入位置の直後カードID(= afterId)を beforeId として送る
-    maybeSendDragHover(columnId, afterId);
-    // HTML5 DnD中は mousemove が来ないので、ここでカーソルも更新する
-    sendCursorAt(e.clientX, e.clientY);
+    const { afterId } = computeDropPosition(bodyEl, e.clientY);
+    updateLocalDragFromPointer(e.clientX, e.clientY, columnId, afterId);
   });
   bodyEl.addEventListener('dragleave', (e) => {
     if (e.target === bodyEl) bodyEl.classList.remove('drag-over');
   });
   bodyEl.addEventListener('drop', (e) => {
     e.preventDefault();
+    e.stopPropagation();
     if (!draggingNodeId) return;
     const nodeId = draggingNodeId;
     const node = state.nodes.get(nodeId);
     const { beforeId, afterId } = computeDropPosition(bodyEl, e.clientY);
-    clearDragVisuals();
     if (!node) return;
+    localDropSucceeded = true;
     if (node.parentId !== columnId) {
       send({ type: 'reparent', nodeId, newParentId: columnId });
     }
@@ -455,160 +507,325 @@ function attachColumnDropZone(bodyEl, columnId) {
   });
 }
 
-// ---- リモートドラッグ描画 (プレゼンス) ----
+// 列の外でもゴースト追従・座標送信を続ける
+boardWrapEl.addEventListener('dragover', (e) => {
+  if (!draggingNodeId) return;
+  e.preventDefault();
+  updateLocalDragFromPointer(e.clientX, e.clientY, null, null);
+});
 
-function clearRemoteDragForNode(nodeId, fromClientId) {
-  if (fromClientId && state.remoteDrags.has(fromClientId)) {
-    const drag = state.remoteDrags.get(fromClientId);
-    if (drag.nodeId === nodeId) endRemoteDrag(fromClientId);
-    return;
-  }
-  for (const [clientId, drag] of [...state.remoteDrags]) {
-    if (drag.nodeId === nodeId) endRemoteDrag(clientId);
-  }
-}
+// ---- 共通ドラッグ状態 / ゴースト ----
 
-function beginRemoteDrag(fromClientId, nodeId) {
+function beginDrag(ownerId, nodeId, { follow, grabOffsetX = 0, grabOffsetY = 0, clientX = null, clientY = null } = {}) {
   const node = state.nodes.get(nodeId);
   if (!node) return;
-  state.remoteDrags.set(fromClientId, {
+  const sourceEl = boardEl.querySelector(`.task[data-node-id="${nodeId}"]`);
+  const rect = sourceEl ? sourceEl.getBoundingClientRect() : { left: 0, top: 0, width: 230, height: 48 };
+  const drag = {
     nodeId,
     columnId: node.parentId,
     beforeId: null,
-    started: true,
-  });
-  ensureDragGhost(fromClientId, node);
-  applyRemoteDragVisuals();
+    bx: null,
+    by: null,
+    grabOffsetX,
+    grabOffsetY,
+    originLeft: rect.left,
+    originTop: rect.top,
+    originWidth: rect.width,
+    confirmed: false,
+    endingTimer: null,
+    anim: null,
+    follow: !!follow,
+  };
+  state.activeDrags.set(ownerId, drag);
+  ensureDragGhost(ownerId, node);
+  if (follow && clientX != null && clientY != null) {
+    positionGhostAtPointer(ownerId, clientX, clientY);
+  } else {
+    setGhostPosition(ownerId, rect.left, rect.top, { immediate: true });
+  }
+  applyDragVisuals({ animateFlip: false });
 }
 
-function updateRemoteDragHover(fromClientId, nodeId, columnId, beforeId) {
-  let drag = state.remoteDrags.get(fromClientId);
+function updateDragHover(ownerId, { nodeId, columnId, beforeId, bx, by }) {
+  let drag = state.activeDrags.get(ownerId);
   if (!drag) {
-    beginRemoteDrag(fromClientId, nodeId);
-    drag = state.remoteDrags.get(fromClientId);
+    beginDrag(ownerId, nodeId, { follow: false });
+    drag = state.activeDrags.get(ownerId);
   }
   if (!drag) return;
   drag.nodeId = nodeId;
   drag.columnId = columnId;
   drag.beforeId = beforeId;
-  applyRemoteDragVisuals();
-  positionDragGhost(fromClientId);
+  drag.bx = bx;
+  drag.by = by;
+  applyDragVisuals({ animateFlip: true });
+
+  if (bx != null && by != null) {
+    cancelGhostAnim(ownerId);
+    const point = boardRatioToClient(bx, by);
+    const left = point.x - drag.grabOffsetX;
+    const top = point.y - drag.grabOffsetY;
+    setGhostPosition(ownerId, left, top, { immediate: prefersReducedMotion(), smooth: true });
+  } else {
+    // AIなど座標無し: 元位置→挿入ギャップへクライアント側で補間
+    interpolateGhostToGap(ownerId);
+  }
 }
 
-function endRemoteDrag(fromClientId) {
-  if (!state.remoteDrags.has(fromClientId)) return;
-  state.remoteDrags.delete(fromClientId);
-  removeDragGhost(fromClientId);
-  applyRemoteDragVisuals();
+function confirmDragForNode(nodeId, fromClientId) {
+  if (fromClientId && state.activeDrags.has(fromClientId)) {
+    const drag = state.activeDrags.get(fromClientId);
+    if (drag.nodeId === nodeId) {
+      drag.confirmed = true;
+      clearDrag(fromClientId);
+      return;
+    }
+  }
+  for (const [clientId, drag] of [...state.activeDrags]) {
+    if (drag.nodeId === nodeId) {
+      drag.confirmed = true;
+      clearDrag(clientId);
+    }
+  }
 }
 
-function clearAllDragGhosts() {
+function endDragWithGrace(ownerId) {
+  const drag = state.activeDrags.get(ownerId);
+  if (!drag) return;
+  if (drag.confirmed) {
+    clearDrag(ownerId);
+    return;
+  }
+  if (drag.endingTimer) clearTimeout(drag.endingTimer);
+  drag.endingTimer = setTimeout(() => {
+    const current = state.activeDrags.get(ownerId);
+    if (!current) return;
+    if (current.confirmed) {
+      clearDrag(ownerId);
+    } else {
+      returnGhostThenClear(ownerId);
+    }
+  }, DRAG_END_GRACE_MS);
+}
+
+function clearDrag(ownerId) {
+  const drag = state.activeDrags.get(ownerId);
+  if (!drag) return;
+  if (drag.endingTimer) clearTimeout(drag.endingTimer);
+  cancelGhostAnim(ownerId);
+  state.activeDrags.delete(ownerId);
+  removeDragGhost(ownerId);
+  applyDragVisuals({ animateFlip: true });
+}
+
+function clearAllDrags() {
+  for (const ownerId of [...state.activeDrags.keys()]) {
+    const drag = state.activeDrags.get(ownerId);
+    if (drag?.endingTimer) clearTimeout(drag.endingTimer);
+    cancelGhostAnim(ownerId);
+  }
+  state.activeDrags.clear();
   dragGhostLayer.innerHTML = '';
 }
 
-function ensureDragGhost(fromClientId, node) {
-  let ghost = dragGhostLayer.querySelector(`[data-ghost-for="${fromClientId}"]`);
+function ensureDragGhost(ownerId, node) {
+  let ghost = dragGhostLayer.querySelector(`[data-ghost-for="${ownerId}"]`);
   if (!ghost) {
     ghost = document.createElement('div');
     ghost.className = 'drag-ghost';
-    ghost.dataset.ghostFor = fromClientId;
+    ghost.dataset.ghostFor = ownerId;
     dragGhostLayer.appendChild(ghost);
   }
-  const color = colorForClient(fromClientId);
+  const drag = state.activeDrags.get(ownerId);
+  ghost.classList.toggle('follow', !!(drag && drag.follow));
+  ghost.classList.remove('returning');
+
+  const color = colorForClient(ownerId);
   ghost.style.borderColor = color;
   ghost.style.boxShadow = `0 12px 28px rgba(0,0,0,.45), 0 0 0 2px ${color}`;
   if (prefersReducedMotion()) ghost.style.transition = 'none';
+
   ghost.innerHTML = '';
   const badge = document.createElement('div');
   badge.className = 'ghost-badge';
   badge.style.background = color;
-  badge.textContent = displayNameForClient(fromClientId);
+  badge.textContent = ownerId === state.clientId ? `${displayNameForClient(ownerId)} (自分)` : displayNameForClient(ownerId);
   const title = document.createElement('div');
   title.className = 'task-title';
   title.textContent = (node.properties.priority === 'high' ? '⭐ ' : '') + (node.properties.title ?? node.id);
   ghost.append(badge, title);
 
-  const sourceEl = boardEl.querySelector(`.task[data-node-id="${node.id}"]`);
-  if (sourceEl) {
-    const rect = sourceEl.getBoundingClientRect();
-    ghost.style.left = `${rect.left}px`;
-    ghost.style.top = `${rect.top}px`;
-    ghost.style.width = `${rect.width}px`;
-  }
+  if (drag?.originWidth) ghost.style.width = `${drag.originWidth}px`;
 }
 
-function removeDragGhost(fromClientId) {
-  const ghost = dragGhostLayer.querySelector(`[data-ghost-for="${fromClientId}"]`);
+function removeDragGhost(ownerId) {
+  const ghost = dragGhostLayer.querySelector(`[data-ghost-for="${ownerId}"]`);
   if (ghost) ghost.remove();
 }
 
-function positionDragGhost(fromClientId) {
-  const drag = state.remoteDrags.get(fromClientId);
-  const ghost = dragGhostLayer.querySelector(`[data-ghost-for="${fromClientId}"]`);
-  if (!drag || !ghost) return;
+function setGhostPosition(ownerId, left, top, { immediate = false, smooth = false, returning = false } = {}) {
+  const ghost = dragGhostLayer.querySelector(`[data-ghost-for="${ownerId}"]`);
+  const drag = state.activeDrags.get(ownerId);
+  if (!ghost) return;
 
-  const gap = boardEl.querySelector(`.drop-placeholder.remote[data-for="${fromClientId}"]`);
-  const targetEl = gap
-    || boardEl.querySelector(`.column-body[data-column-id="${drag.columnId}"]`)
-    || boardEl.querySelector(`.task[data-node-id="${drag.nodeId}"]`);
-  if (!targetEl) return;
-  const rect = targetEl.getBoundingClientRect();
-  ghost.style.left = `${rect.left}px`;
-  ghost.style.top = `${rect.top}px`;
-  if (rect.width > 40) ghost.style.width = `${rect.width}px`;
+  ghost.classList.toggle('follow', !!(drag && drag.follow) && !returning);
+  ghost.classList.toggle('returning', returning && !prefersReducedMotion());
+  if (prefersReducedMotion() || immediate) {
+    const prev = ghost.style.transition;
+    ghost.style.transition = 'none';
+    ghost.style.left = `${left}px`;
+    ghost.style.top = `${top}px`;
+    ghost.getBoundingClientRect();
+    ghost.style.transition = prev;
+  } else {
+    if (smooth && !drag?.follow) {
+      ghost.style.transition = '';
+    }
+    ghost.style.left = `${left}px`;
+    ghost.style.top = `${top}px`;
+  }
 
-  if (fromClientId === AI_CLIENT_ID) {
-    moveAiCursorToPoint(rect.left + rect.width / 2 - 7, rect.top - 24);
+  if (ownerId === AI_CLIENT_ID) {
+    moveAiCursorToPoint(left + (drag?.originWidth || 230) / 2 - 7, top - 24);
   }
 }
 
-function syncRemoteDragDom() {
-  // 既存のリモート用プレースホルダーとソース装飾を一旦外す
-  boardEl.querySelectorAll('.drop-placeholder.remote').forEach((el) => el.remove());
-  boardEl.querySelectorAll('.task.remote-drag-source').forEach((el) => {
-    el.classList.remove('remote-drag-source');
-    const label = el.querySelector('.remote-drag-label');
+function positionGhostAtPointer(ownerId, clientX, clientY) {
+  const drag = state.activeDrags.get(ownerId);
+  if (!drag) return;
+  setGhostPosition(ownerId, clientX - drag.grabOffsetX, clientY - drag.grabOffsetY, { immediate: true });
+}
+
+function cancelGhostAnim(ownerId) {
+  const drag = state.activeDrags.get(ownerId);
+  if (drag?.anim) {
+    cancelAnimationFrame(drag.anim.raf);
+    drag.anim = null;
+  }
+}
+
+function interpolateGhostToGap(ownerId) {
+  const drag = state.activeDrags.get(ownerId);
+  const ghost = dragGhostLayer.querySelector(`[data-ghost-for="${ownerId}"]`);
+  if (!drag || !ghost) return;
+
+  const gap = boardEl.querySelector(`.drop-placeholder[data-for="${ownerId}"]`);
+  const targetEl = gap
+    || boardEl.querySelector(`.column-body[data-column-id="${drag.columnId}"]`)
+    || null;
+  if (!targetEl) return;
+
+  const target = targetEl.getBoundingClientRect();
+  const fromLeft = parseFloat(ghost.style.left) || drag.originLeft;
+  const fromTop = parseFloat(ghost.style.top) || drag.originTop;
+  const toLeft = target.left;
+  const toTop = target.top;
+
+  if (prefersReducedMotion()) {
+    setGhostPosition(ownerId, toLeft, toTop, { immediate: true });
+    return;
+  }
+
+  cancelGhostAnim(ownerId);
+  const duration = AI_INTERPOLATE_MS;
+  const start = performance.now();
+  ghost.classList.remove('follow', 'returning');
+  ghost.style.transition = 'none';
+
+  const easeInOut = (t) => (t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2);
+
+  const tick = (now) => {
+    const current = state.activeDrags.get(ownerId);
+    if (!current || current !== drag) return;
+    const t = Math.min(1, (now - start) / duration);
+    const e = easeInOut(t);
+    const left = fromLeft + (toLeft - fromLeft) * e;
+    const top = fromTop + (toTop - fromTop) * e;
+    ghost.style.left = `${left}px`;
+    ghost.style.top = `${top}px`;
+    if (ownerId === AI_CLIENT_ID) {
+      moveAiCursorToPoint(left + (drag.originWidth || 230) / 2 - 7, top - 24);
+    }
+    if (t < 1) {
+      drag.anim = { raf: requestAnimationFrame(tick) };
+    } else {
+      drag.anim = null;
+      ghost.style.transition = '';
+    }
+  };
+  drag.anim = { raf: requestAnimationFrame(tick) };
+}
+
+function returnGhostThenClear(ownerId) {
+  const drag = state.activeDrags.get(ownerId);
+  const ghost = dragGhostLayer.querySelector(`[data-ghost-for="${ownerId}"]`);
+  if (!drag) return;
+  cancelGhostAnim(ownerId);
+
+  const finish = () => clearDrag(ownerId);
+  if (!ghost || prefersReducedMotion()) {
+    finish();
+    return;
+  }
+
+  setGhostPosition(ownerId, drag.originLeft, drag.originTop, { returning: true });
+  const onEnd = (ev) => {
+    if (ev.propertyName !== 'top' && ev.propertyName !== 'left') return;
+    ghost.removeEventListener('transitionend', onEnd);
+    finish();
+  };
+  ghost.addEventListener('transitionend', onEnd);
+  setTimeout(finish, GHOST_RETURN_MS + 80);
+}
+
+function syncDragDom() {
+  boardEl.querySelectorAll('.drop-placeholder[data-for]').forEach((el) => el.remove());
+  boardEl.querySelectorAll('.task.drag-source').forEach((el) => {
+    el.classList.remove('drag-source');
+    const label = el.querySelector('.drag-source-label');
     if (label) label.remove();
   });
+  document.querySelectorAll('.column-body.drag-over').forEach((el) => el.classList.remove('drag-over'));
 
-  for (const [fromClientId, drag] of state.remoteDrags) {
+  for (const [ownerId, drag] of state.activeDrags) {
     const sourceEl = boardEl.querySelector(`.task[data-node-id="${drag.nodeId}"]`);
     if (sourceEl) {
-      sourceEl.classList.add('remote-drag-source');
-      if (!sourceEl.querySelector('.remote-drag-label')) {
+      sourceEl.classList.add('drag-source');
+      if (!sourceEl.querySelector('.drag-source-label')) {
         const label = document.createElement('div');
-        label.className = 'remote-drag-label';
-        label.textContent = `${displayNameForClient(fromClientId)}が移動中`;
+        label.className = 'drag-source-label';
+        label.textContent = ownerId === state.clientId
+          ? '移動中'
+          : `${displayNameForClient(ownerId)}が移動中`;
         sourceEl.appendChild(label);
       }
     }
 
+    if (!drag.columnId) continue;
     const bodyEl = boardEl.querySelector(`.column-body[data-column-id="${drag.columnId}"]`);
     if (!bodyEl) continue;
     const gap = document.createElement('div');
-    gap.className = 'drop-placeholder remote';
-    gap.dataset.for = fromClientId;
+    gap.className = 'drop-placeholder';
+    gap.dataset.for = ownerId;
 
-    // beforeId = 挿入位置の直後のカード。それがソース自身なら無視して末尾扱い。
     const afterEl = drag.beforeId && drag.beforeId !== drag.nodeId
       ? bodyEl.querySelector(`.task[data-node-id="${drag.beforeId}"]`)
       : null;
     if (afterEl) bodyEl.insertBefore(gap, afterEl);
     else bodyEl.appendChild(gap);
 
-    // 空列のヒントは隙間があるときは隠す
     const empty = bodyEl.querySelector('.column-empty');
     if (empty) empty.style.display = 'none';
+
+    if (ownerId === state.clientId) bodyEl.classList.add('drag-over');
   }
 }
 
-function applyRemoteDragVisuals() {
-  const oldRects = captureTaskRects();
-  syncRemoteDragDom();
-  playTaskTransitions(oldRects);
-  for (const fromClientId of state.remoteDrags.keys()) {
-    positionDragGhost(fromClientId);
-  }
+function applyDragVisuals({ animateFlip = true } = {}) {
+  const oldRects = animateFlip ? captureTaskRects() : null;
+  syncDragDom();
+  if (animateFlip && oldRects) playTaskTransitions(oldRects);
 }
 
 // ---- 描画 ----
@@ -634,7 +851,6 @@ function playTaskTransitions(oldRects) {
     const oldRect = oldRects.get(nodeId);
 
     if (!oldRect) {
-      // 新規に現れたタスク: フェード + 拡大しながら登場させる
       el.classList.add('task-enter');
       requestAnimationFrame(() => {
         requestAnimationFrame(() => el.classList.add('task-enter-active'));
@@ -650,11 +866,11 @@ function playTaskTransitions(oldRects) {
     const newRect = el.getBoundingClientRect();
     const dx = oldRect.left - newRect.left;
     const dy = oldRect.top - newRect.top;
-    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return; // 位置が変わっていなければ何もしない
+    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return;
 
     el.style.transition = 'none';
     el.style.transform = `translate(${dx}px, ${dy}px)`;
-    el.getBoundingClientRect(); // 強制リフローで上の指定を確定させてからトランジションに戻す
+    el.getBoundingClientRect();
     requestAnimationFrame(() => {
       el.style.transition = 'transform 380ms cubic-bezier(.2,.8,.2,1)';
       el.style.transform = '';
@@ -674,14 +890,23 @@ function renderAll() {
   for (const col of columns) {
     boardEl.appendChild(renderColumn(col));
   }
-  // ギャップ挿入後にまとめてFLIPし、再描画でリモートドラッグ描写が消えないようにする
-  if (state.remoteDrags.size > 0) syncRemoteDragDom();
+  if (state.activeDrags.size > 0) syncDragDom();
   playTaskTransitions(oldRects);
-  for (const fromClientId of state.remoteDrags.keys()) {
-    const drag = state.remoteDrags.get(fromClientId);
-    const node = drag && state.nodes.get(drag.nodeId);
-    if (node) ensureDragGhost(fromClientId, node);
-    positionDragGhost(fromClientId);
+  for (const [ownerId, drag] of state.activeDrags) {
+    const node = state.nodes.get(drag.nodeId);
+    if (node) ensureDragGhost(ownerId, node);
+    if (drag.follow && draggingNodeId === drag.nodeId) {
+      positionGhostAtPointer(ownerId, lastPointer.x, lastPointer.y);
+    } else if (drag.bx != null && drag.by != null) {
+      const point = boardRatioToClient(drag.bx, drag.by);
+      setGhostPosition(ownerId, point.x - drag.grabOffsetX, point.y - drag.grabOffsetY, { immediate: true });
+    } else {
+      const gap = boardEl.querySelector(`.drop-placeholder[data-for="${ownerId}"]`);
+      if (gap) {
+        const rect = gap.getBoundingClientRect();
+        setGhostPosition(ownerId, rect.left, rect.top, { immediate: true });
+      }
+    }
   }
 }
 
@@ -769,6 +994,7 @@ function renderTask(task) {
 
   el.addEventListener('dragstart', (e) => {
     draggingNodeId = task.id;
+    localDropSucceeded = false;
     lastDragHoverKey = null;
     lastDragHoverSentAt = 0;
     pendingDragHover = null;
@@ -776,25 +1002,51 @@ function renderTask(task) {
       clearTimeout(pendingDragHoverTimer);
       pendingDragHoverTimer = null;
     }
-    el.classList.add('dragging');
+
+    const rect = el.getBoundingClientRect();
+    const grabOffsetX = e.clientX - rect.left;
+    const grabOffsetY = e.clientY - rect.top;
+    lastPointer = { x: e.clientX, y: e.clientY };
+
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', task.id);
-    send({ type: 'drag-start', nodeId: task.id });
+    // ブラウザ標準のドラッグ画像を消し、共通ゴーストだけを見せる
+    e.dataTransfer.setDragImage(TRANSPARENT_DRAG_IMAGE, 0, 0);
+
+    beginDrag(state.clientId, task.id, {
+      follow: true,
+      grabOffsetX,
+      grabOffsetY,
+      clientX: e.clientX,
+      clientY: e.clientY,
+    });
+    send({ type: 'drag-start', nodeId: task.id, ox: grabOffsetX, oy: grabOffsetY });
   });
+
   el.addEventListener('dragend', () => {
-    if (pendingDragHover) flushDragHover(pendingDragHover.columnId, pendingDragHover.insertBeforeId);
     if (pendingDragHoverTimer) {
       clearTimeout(pendingDragHoverTimer);
       pendingDragHoverTimer = null;
     }
-    if (draggingNodeId) {
-      send({ type: 'drag-end', nodeId: draggingNodeId });
-    }
+    flushDragHover();
+
+    const nodeId = draggingNodeId;
+    if (nodeId) send({ type: 'drag-end', nodeId });
+
     draggingNodeId = null;
     lastDragHoverKey = null;
     pendingDragHover = null;
-    el.classList.remove('dragging');
-    clearDragVisuals();
+
+    if (localDropSucceeded) {
+      // 確定は reparent/move の受信で confirm → FLIP 着地。ゴーストは即消し。
+      const drag = state.activeDrags.get(state.clientId);
+      if (drag) drag.confirmed = true;
+      clearDrag(state.clientId);
+    } else {
+      // キャンセル: 本人画面でも元位置へ戻してから消す
+      returnGhostThenClear(state.clientId);
+    }
+    localDropSucceeded = false;
   });
 
   return el;
@@ -802,11 +1054,11 @@ function renderTask(task) {
 
 // ---- カーソル位置の同期 ----
 // 通常時は mousemove。HTML5 DnD 中は mousemove が止まるため、
-// 列の dragover ハンドラ側でも cursor-move を送っている。
+// dragover ハンドラ側でも cursor-move を送っている。
 
 let lastCursorSent = 0;
 boardWrapEl.addEventListener('mousemove', (e) => {
-  if (draggingNodeId) return; // dragover 側に任せる
+  if (draggingNodeId) return;
   const now = performance.now();
   if (now - lastCursorSent > 40) {
     lastCursorSent = now;
