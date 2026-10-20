@@ -359,6 +359,8 @@ function addTask(columnId) {
 let draggingNodeId = null;
 let lastDragHoverKey = null;
 let lastDragHoverSentAt = 0;
+let pendingDragHover = null;
+let pendingDragHoverTimer = null;
 const placeholder = document.createElement('div');
 placeholder.className = 'drop-placeholder';
 
@@ -388,19 +390,38 @@ function sendCursorAt(clientX, clientY) {
   send({ type: 'cursor-move', x: Math.round(clientX), y: Math.round(clientY) });
 }
 
-function maybeSendDragHover(columnId, insertBeforeId) {
+function flushDragHover(columnId, insertBeforeId) {
+  if (!draggingNodeId) return;
   const key = `${draggingNodeId}|${columnId}|${insertBeforeId ?? ''}`;
-  if (key === lastDragHoverKey) return; // 挿入位置が変わっていない
-  const now = performance.now();
-  if (now - lastDragHoverSentAt < DRAG_HOVER_MIN_INTERVAL_MS) return; // 最大でも約50msに1回
+  if (key === lastDragHoverKey) return;
   lastDragHoverKey = key;
-  lastDragHoverSentAt = now;
+  lastDragHoverSentAt = performance.now();
+  pendingDragHover = null;
   send({
     type: 'drag-hover',
     nodeId: draggingNodeId,
     columnId,
     beforeId: insertBeforeId,
   });
+}
+
+function maybeSendDragHover(columnId, insertBeforeId) {
+  const key = `${draggingNodeId}|${columnId}|${insertBeforeId ?? ''}`;
+  if (key === lastDragHoverKey) return; // 挿入位置が変わっていない
+  const now = performance.now();
+  const wait = DRAG_HOVER_MIN_INTERVAL_MS - (now - lastDragHoverSentAt);
+  if (wait > 0) {
+    // スロットル中でも最終位置は取りこぼさない
+    pendingDragHover = { columnId, insertBeforeId };
+    if (!pendingDragHoverTimer) {
+      pendingDragHoverTimer = setTimeout(() => {
+        pendingDragHoverTimer = null;
+        if (pendingDragHover) flushDragHover(pendingDragHover.columnId, pendingDragHover.insertBeforeId);
+      }, wait);
+    }
+    return;
+  }
+  flushDragHover(columnId, insertBeforeId);
 }
 
 function attachColumnDropZone(bodyEl, columnId) {
@@ -750,17 +771,28 @@ function renderTask(task) {
     draggingNodeId = task.id;
     lastDragHoverKey = null;
     lastDragHoverSentAt = 0;
+    pendingDragHover = null;
+    if (pendingDragHoverTimer) {
+      clearTimeout(pendingDragHoverTimer);
+      pendingDragHoverTimer = null;
+    }
     el.classList.add('dragging');
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', task.id);
     send({ type: 'drag-start', nodeId: task.id });
   });
   el.addEventListener('dragend', () => {
+    if (pendingDragHover) flushDragHover(pendingDragHover.columnId, pendingDragHover.insertBeforeId);
+    if (pendingDragHoverTimer) {
+      clearTimeout(pendingDragHoverTimer);
+      pendingDragHoverTimer = null;
+    }
     if (draggingNodeId) {
       send({ type: 'drag-end', nodeId: draggingNodeId });
     }
     draggingNodeId = null;
     lastDragHoverKey = null;
+    pendingDragHover = null;
     el.classList.remove('dragging');
     clearDragVisuals();
   });
