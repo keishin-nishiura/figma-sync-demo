@@ -41,11 +41,45 @@
   .task.ai-focused { animation: ai-pulse .9s ease; }
   .task.task-enter { opacity: 0; transform: scale(.85); }
   .task.task-enter-active { opacity: 1; transform: scale(1); transition: opacity 220ms ease, transform 220ms ease; }
+  .task.remote-drag-source {
+    opacity: .35; border-style: dashed;
+  }
+  .task.remote-drag-source .remote-drag-label {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 11px; color: #bbb; pointer-events: none; background: rgba(30,30,30,.45);
+    border-radius: 6px;
+  }
+  .drop-placeholder.remote {
+    background: transparent; box-shadow: none;
+    border: 1.5px dashed rgba(255,255,255,.25); height: 44px; margin-bottom: 8px;
+  }
   @keyframes ai-pulse { 0% { box-shadow: 0 0 0 0 rgba(249,115,22,.6); } 100% { box-shadow: 0 0 0 8px rgba(249,115,22,0); } }
   .task-title { line-height: 1.4; }
   .task .selected-by-badge {
     position: absolute; top: -18px; left: -2px; font-size: 10px; padding: 1px 6px;
     border-radius: 4px 4px 4px 0; color: #fff; white-space: nowrap;
+  }
+  #drag-ghost-layer { position: fixed; inset: 0; pointer-events: none; z-index: 40; }
+  .drag-ghost {
+    position: fixed; width: 230px; background: #2f2f2f; border-radius: 8px;
+    padding: 10px 10px 8px; font-size: 13px; border: 2px solid #fff;
+    box-shadow: 0 12px 28px rgba(0,0,0,.45); transform: scale(1.04);
+    transition: top 200ms cubic-bezier(.2,.8,.2,1), left 200ms cubic-bezier(.2,.8,.2,1);
+    z-index: 41;
+  }
+  .drag-ghost .ghost-badge {
+    position: absolute; top: -18px; left: -2px; font-size: 10px; padding: 1px 6px;
+    border-radius: 4px 4px 4px 0; color: #fff; white-space: nowrap;
+  }
+  .drag-ghost .task-title { line-height: 1.4; }
+  @media (prefers-reduced-motion: reduce) {
+    .drag-ghost { transition: none; }
+    .task.task-enter-active { transition: none; }
+  }
+  #cursor-layer { position: fixed; inset: 0; pointer-events: none; z-index: 45; }
+  .remote-cursor { position: absolute; display: flex; align-items: center; gap: 4px; transform: translate(-2px, -2px); }
+  .remote-cursor .label {
+    font-size: 10px; color: #fff; padding: 1px 5px; border-radius: 3px; white-space: nowrap;
   }
   .task-actions { display: flex; gap: 4px; margin-top: 6px; }
   .task-actions button {
@@ -93,6 +127,8 @@
     </div>
     <div id="board"></div>
   </div>
+  <div id="drag-ghost-layer"></div>
+  <div id="cursor-layer"></div>
   <div id="ai-cursor"><div class="dot"></div><div class="label">AI</div></div>
   <div id="sidebar">
     <div id="presence"><h2>参加者</h2><div id="presence-list"></div></div>
