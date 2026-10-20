@@ -16,6 +16,8 @@ const DRAG_HOVER_MIN_INTERVAL_MS = 40;
 const DRAG_END_GRACE_MS = 100;
 const AI_INTERPOLATE_MS = 450;
 const GHOST_RETURN_MS = 220;
+const LANDING_DURATION_MS = 160;
+const FLIP_DURATION_MS = 380;
 const prefersReducedMotion = () =>
   typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -47,6 +49,8 @@ const state = {
   // { nodeId, columnId, beforeId, bx, by, grabOffsetX, grabOffsetY,
   //   originLeft, originTop, originWidth, confirmed, endingTimer, anim }
   activeDrags: new Map(),
+  // nodeId -> ゴースト最後の矩形。確定FLIPの First に差し替える。
+  pendingLandings: new Map(),
   aiStatus: 'idle',
 };
 
@@ -122,9 +126,9 @@ function handleMessage(msg) {
       if (!node) break;
       node.parentId = msg.newParentId;
       node.order = msg.order;
-      // 確定 → ゴーストは即消し、FLIPの着地に任せる
+      // ゴーストは renderAll まで残し、FLIP の First をゴースト位置にする
       confirmDragForNode(msg.nodeId, msg.fromClientId);
-      renderAll();
+      scheduleRenderAll();
       break;
     }
     case 'node-moved': {
@@ -132,7 +136,7 @@ function handleMessage(msg) {
       if (!node) break;
       node.order = msg.order;
       confirmDragForNode(msg.nodeId, msg.fromClientId);
-      renderAll();
+      scheduleRenderAll();
       break;
     }
     case 'node-deleted': {
@@ -459,6 +463,7 @@ function maybeSendDragHover(columnId, insertBeforeId, bx, by) {
 }
 
 function updateLocalDragFromPointer(clientX, clientY, columnId, insertBeforeId) {
+  if (localDropSucceeded) return;
   lastPointer = { x: clientX, y: clientY };
   const drag = state.activeDrags.get(state.clientId);
   if (!drag) return;
@@ -573,39 +578,46 @@ function updateDragHover(ownerId, { nodeId, columnId, beforeId, bx, by }) {
   }
 }
 
+function readLandingRect(ownerId) {
+  const ghost = dragGhostLayer.querySelector(`[data-ghost-for="${ownerId}"]`);
+  if (ghost) return ghost.getBoundingClientRect();
+  const gap = boardEl.querySelector(`.drop-placeholder[data-for="${ownerId}"]`);
+  if (gap) return gap.getBoundingClientRect();
+  return null;
+}
+
+function stashLandingFromGhost(ownerId, nodeId) {
+  const rect = readLandingRect(ownerId);
+  if (rect) state.pendingLandings.set(nodeId, rect);
+}
+
 function confirmDragForNode(nodeId, fromClientId) {
-  if (fromClientId && state.activeDrags.has(fromClientId)) {
-    const drag = state.activeDrags.get(fromClientId);
-    if (drag.nodeId === nodeId) {
-      drag.confirmed = true;
-      clearDrag(fromClientId);
-      return;
-    }
-  }
-  for (const [clientId, drag] of [...state.activeDrags]) {
-    if (drag.nodeId === nodeId) {
-      drag.confirmed = true;
-      clearDrag(clientId);
-    }
-  }
+  const mark = (clientId) => {
+    const drag = state.activeDrags.get(clientId);
+    if (!drag || drag.nodeId !== nodeId) return false;
+    drag.confirmed = true;
+    stashLandingFromGhost(clientId, nodeId);
+    // ゴーストと隙間は renderAll が First を取るまで残す。ここで消すと
+    // 運ばれたカードの FLIP が元の列から始まってしまう。
+    return true;
+  };
+  if (fromClientId && mark(fromClientId)) return;
+  for (const clientId of [...state.activeDrags.keys()]) mark(clientId);
 }
 
 function endDragWithGrace(ownerId) {
   const drag = state.activeDrags.get(ownerId);
   if (!drag) return;
   if (drag.confirmed) {
-    clearDrag(ownerId);
+    // 確定済みなら renderAll が着地FLIPのあと片付ける。先に消さない。
     return;
   }
   if (drag.endingTimer) clearTimeout(drag.endingTimer);
   drag.endingTimer = setTimeout(() => {
     const current = state.activeDrags.get(ownerId);
     if (!current) return;
-    if (current.confirmed) {
-      clearDrag(ownerId);
-    } else {
-      returnGhostThenClear(ownerId);
-    }
+    if (current.confirmed) return;
+    returnGhostThenClear(ownerId);
   }, DRAG_END_GRACE_MS);
 }
 
@@ -626,6 +638,7 @@ function clearAllDrags() {
     cancelGhostAnim(ownerId);
   }
   state.activeDrags.clear();
+  state.pendingLandings.clear();
   dragGhostLayer.innerHTML = '';
 }
 
@@ -844,11 +857,18 @@ function captureTaskRects() {
   return rects;
 }
 
+function applyLandingFirsts(rects) {
+  for (const [nodeId, rect] of state.pendingLandings) {
+    rects.set(nodeId, rect);
+  }
+}
+
 function playTaskTransitions(oldRects) {
   if (prefersReducedMotion()) return;
   boardEl.querySelectorAll('.task').forEach((el) => {
     const nodeId = el.dataset.nodeId;
     const oldRect = oldRects.get(nodeId);
+    const isLanding = state.pendingLandings.has(nodeId);
 
     if (!oldRect) {
       el.classList.add('task-enter');
@@ -868,11 +888,12 @@ function playTaskTransitions(oldRects) {
     const dy = oldRect.top - newRect.top;
     if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return;
 
+    const duration = isLanding ? LANDING_DURATION_MS : FLIP_DURATION_MS;
     el.style.transition = 'none';
     el.style.transform = `translate(${dx}px, ${dy}px)`;
     el.getBoundingClientRect();
     requestAnimationFrame(() => {
-      el.style.transition = 'transform 380ms cubic-bezier(.2,.8,.2,1)';
+      el.style.transition = `transform ${duration}ms cubic-bezier(.2,.8,.2,1)`;
       el.style.transform = '';
     });
     el.addEventListener(
@@ -883,8 +904,31 @@ function playTaskTransitions(oldRects) {
   });
 }
 
+let renderAllScheduled = false;
+function scheduleRenderAll() {
+  if (renderAllScheduled) return;
+  renderAllScheduled = true;
+  requestAnimationFrame(() => {
+    renderAllScheduled = false;
+    renderAll();
+  });
+}
+
+function settleConfirmedDrags() {
+  for (const [ownerId, drag] of [...state.activeDrags]) {
+    if (!drag.confirmed) continue;
+    if (drag.endingTimer) clearTimeout(drag.endingTimer);
+    cancelGhostAnim(ownerId);
+    state.activeDrags.delete(ownerId);
+    removeDragGhost(ownerId);
+  }
+}
+
 function renderAll() {
+  // First はゴースト残し・隙間残しの状態で取る。運ばれたカードは pendingLandings で上書き。
   const oldRects = captureTaskRects();
+  applyLandingFirsts(oldRects);
+  settleConfirmedDrags();
   boardEl.innerHTML = '';
   const columns = getChildren('root').filter((n) => n.properties?.type === 'column');
   for (const col of columns) {
@@ -892,6 +936,7 @@ function renderAll() {
   }
   if (state.activeDrags.size > 0) syncDragDom();
   playTaskTransitions(oldRects);
+  state.pendingLandings.clear();
   for (const [ownerId, drag] of state.activeDrags) {
     const node = state.nodes.get(drag.nodeId);
     if (node) ensureDragGhost(ownerId, node);
@@ -1038,10 +1083,13 @@ function renderTask(task) {
     pendingDragHover = null;
 
     if (localDropSucceeded) {
-      // 確定は reparent/move の受信で confirm → FLIP 着地。ゴーストは即消し。
+      // 確定メッセージが First を取れるよう、ゴーストは残しておく
       const drag = state.activeDrags.get(state.clientId);
-      if (drag) drag.confirmed = true;
-      clearDrag(state.clientId);
+      if (drag) {
+        drag.confirmed = true;
+        stashLandingFromGhost(state.clientId, drag.nodeId);
+        drag.follow = false;
+      }
     } else {
       // キャンセル: 本人画面でも元位置へ戻してから消す
       returnGhostThenClear(state.clientId);
