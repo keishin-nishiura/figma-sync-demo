@@ -45,8 +45,9 @@ const httpServer = http.createServer((req, res) => {
 // アイデアを別の題材でも試した3つのおまけルームを用意している。
 // いずれも server/document.js の同じ Document クラスと、既存の
 // update-property/reparent/move-node/create-node/delete-node/select-node/
-// cursor-move といった既存メッセージ型をそのまま使い回しており、
+// cursor-move / drag-start/hover/end といった既存メッセージ型をそのまま使い回しており、
 // ルーム固有の特別な同期ロジックはどこにも追加していない。
+// (drag-* は Document に触れないプレゼンス中継のみ)
 //
 //   canvas  : 元々のFigma同期デモ(このファイルの本編)。無変更。
 //   agent   : Kanban風のAI協働ワークスペース。
@@ -115,7 +116,7 @@ function createRoom(name, seedFn) {
     name,
     doc,
     seedFn,
-    clients: new Map(), // ws -> { clientId }
+    clients: new Map(), // ws -> { clientId, draggingNodeId }
     aiStatus: 'idle',
   };
 }
@@ -189,7 +190,7 @@ const wss = new WebSocketServer({ server: httpServer });
 wss.on('connection', (ws, req) => {
   const room = roomForRequest(req);
   const clientId = randomUUID().slice(0, 8);
-  room.clients.set(ws, { clientId });
+  room.clients.set(ws, { clientId, draggingNodeId: null });
   console.log(`[server] client connected: ${clientId} (room=${room.name})`);
 
   sendTo(ws, {
@@ -275,6 +276,37 @@ wss.on('connection', (ws, req) => {
         break;
       }
 
+      // ドラッグ中の描写は Document には触れず、cursor-move / select-node と同じく
+      // プレゼンスとして中継するだけ(永続化しない)。
+      case 'drag-start': {
+        if (!msg.nodeId || !room.doc.nodes.has(msg.nodeId)) break;
+        const meta = room.clients.get(ws);
+        if (meta) meta.draggingNodeId = msg.nodeId;
+        broadcastExcept(room, { type: 'drag-start', nodeId: msg.nodeId, fromClientId: clientId }, ws);
+        break;
+      }
+      case 'drag-hover': {
+        if (!msg.nodeId || !room.doc.nodes.has(msg.nodeId)) break;
+        if (!msg.columnId || !room.doc.nodes.has(msg.columnId)) break;
+        const beforeId = msg.beforeId ?? null;
+        if (beforeId != null && !room.doc.nodes.has(beforeId)) break;
+        broadcastExcept(room, {
+          type: 'drag-hover',
+          nodeId: msg.nodeId,
+          columnId: msg.columnId,
+          beforeId,
+          fromClientId: clientId,
+        }, ws);
+        break;
+      }
+      case 'drag-end': {
+        const meta = room.clients.get(ws);
+        const nodeId = msg.nodeId ?? meta?.draggingNodeId ?? null;
+        if (meta) meta.draggingNodeId = null;
+        broadcastExcept(room, { type: 'drag-end', nodeId, fromClientId: clientId }, ws);
+        break;
+      }
+
       // ---- AI付きルーム共通 ----
       case 'seed-demo-data': {
         if (!hasAi(room)) break;
@@ -305,8 +337,15 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => {
+    const meta = room.clients.get(ws);
+    const draggingNodeId = meta?.draggingNodeId ?? null;
     room.clients.delete(ws);
     console.log(`[server] client disconnected: ${clientId} (room=${room.name})`);
+    // ドラッグ中に切断された場合、他クライアントにゴーストが残らないよう
+    // drag-end 相当を中継してから client-left を知らせる。
+    if (draggingNodeId) {
+      broadcast(room, { type: 'drag-end', nodeId: draggingNodeId, fromClientId: clientId });
+    }
     broadcast(room, { type: 'client-left', clientId });
   });
 });
