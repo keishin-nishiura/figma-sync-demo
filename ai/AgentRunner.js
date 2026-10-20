@@ -110,6 +110,77 @@ function describeAction(action, result) {
   }
 }
 
+// カード移動の「運んでいる途中」描写。人間の DnD と同じ drag-start /
+// drag-hover / drag-end プレゼンスを使い、Document には触れない。
+function columnPath(doc, fromColId, toColId) {
+  const cols = doc.getChildren('root').filter((n) => n.properties?.type === 'column');
+  const fromIdx = cols.findIndex((c) => c.id === fromColId);
+  const toIdx = cols.findIndex((c) => c.id === toColId);
+  if (fromIdx < 0 || toIdx < 0 || fromIdx === toIdx) return [toColId];
+  const path = [];
+  const step = fromIdx < toIdx ? 1 : -1;
+  for (let i = fromIdx + step; i !== toIdx + step; i += step) {
+    path.push(cols[i].id);
+  }
+  return path.length ? path : [toColId];
+}
+
+function hoverDelay() {
+  return 300 + Math.random() * 300; // 300〜600ms
+}
+
+async function playDragPresence(room, broadcast, { nodeId, toColumnId, insertBeforeId }) {
+  const node = room.doc.nodes.get(nodeId);
+  if (!node) return;
+
+  broadcast(room, { type: 'drag-start', nodeId, fromClientId: AI_CLIENT_ID });
+  broadcast(room, { type: 'ai-cursor', nodeId });
+  await sleep(hoverDelay());
+
+  const path = columnPath(room.doc, node.parentId, toColumnId);
+  for (let i = 0; i < path.length; i++) {
+    const columnId = path[i];
+    const isLast = i === path.length - 1;
+    // プレゼンスの beforeId = 挿入位置の直後のカード(末尾なら null)。
+    // 途中の列では末尾へ向かう途中として null を使い、最終列だけ本番の位置を使う。
+    const beforeId = isLast ? (insertBeforeId ?? null) : null;
+    broadcast(room, {
+      type: 'drag-hover',
+      nodeId,
+      columnId,
+      beforeId,
+      fromClientId: AI_CLIENT_ID,
+    });
+    broadcast(room, { type: 'ai-cursor', nodeId });
+    await sleep(hoverDelay());
+  }
+}
+
+function endDragPresence(room, broadcast, nodeId) {
+  broadcast(room, { type: 'drag-end', nodeId, fromClientId: AI_CLIENT_ID });
+}
+
+function dragTargetForAction(doc, action) {
+  if (action.type === 'reparent') {
+    return {
+      nodeId: action.nodeId,
+      toColumnId: action.newParentId,
+      insertBeforeId: null, // reparent は列末尾へ
+    };
+  }
+  if (action.type === 'move-node') {
+    const node = doc.nodes.get(action.nodeId);
+    if (!node) return null;
+    // Document の afterId = 直後の兄弟 = プレゼンスの beforeId
+    return {
+      nodeId: action.nodeId,
+      toColumnId: node.parentId,
+      insertBeforeId: action.afterId ?? null,
+    };
+  }
+  return null;
+}
+
 // 1つの自然言語指示を処理する。
 // 人間の操作と全く同じ「Document変更 → broadcast」経路を1アクションずつ、
 // 見た目にも分かるペース(300〜700ms)で実行する。UIをブロックしないよう、
@@ -162,10 +233,17 @@ export async function runAgentInstruction({ room, instruction, provider, broadca
   for (const action of actions) {
     const targetNodeId = action.nodeId ?? null;
     const showCinematic = !isFastBatch && targetNodeId && room.doc.nodes.has(targetNodeId);
+    const dragTarget = showCinematic ? dragTargetForAction(room.doc, action) : null;
+    let dragStarted = false;
 
     if (showCinematic) {
-      broadcast(room, { type: 'ai-cursor', nodeId: targetNodeId });
-      await sleep(randDelay());
+      if (dragTarget) {
+        await playDragPresence(room, broadcast, dragTarget);
+        dragStarted = true;
+      } else {
+        broadcast(room, { type: 'ai-cursor', nodeId: targetNodeId });
+        await sleep(randDelay());
+      }
       broadcast(room, { type: 'select-node', nodeId: targetNodeId, fromClientId: AI_CLIENT_ID });
       await sleep(200);
     }
@@ -179,8 +257,17 @@ export async function runAgentInstruction({ room, instruction, provider, broadca
       if (!isFastBatch) {
         logActivity(room, { actor: AI_CLIENT_ID, action: action.type, detail: describeAction(action, result) });
       }
+      if (dragStarted) {
+        endDragPresence(room, broadcast, targetNodeId);
+        dragStarted = false;
+      }
     } else {
       rejectedCount += 1;
+      // 拒否された操作ではドラッグ描写を途中で打ち切って元に戻す
+      if (dragStarted) {
+        endDragPresence(room, broadcast, targetNodeId);
+        dragStarted = false;
+      }
       if (!isFastBatch) {
         logActivity(room, {
           actor: AI_CLIENT_ID,
