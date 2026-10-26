@@ -119,7 +119,7 @@ console.log('=== シナリオ5: Agent Workspace のドラッグ中プレゼン�
 const port = await getFreePort();
 const server = await startServerOnPort(port);
 const agentUrl = `ws://127.0.0.1:${port}/ws-agent`;
-const paintUrl = `ws://127.0.0.1:${port}/ws-paint`;
+const canvasUrl = `ws://127.0.0.1:${port}`;
 
 let failed = false;
 try {
@@ -127,11 +127,11 @@ try {
   console.log('--- (a) bx/by 付き drag-hover のルーム内中継 ---');
   const a = new AgentWs('A', agentUrl);
   const b = new AgentWs('B', agentUrl);
-  const paint = new AgentWs('paint', paintUrl);
-  await Promise.all([a.connect(), b.connect(), paint.connect()]);
+  const canvas = new AgentWs('canvas', canvasUrl);
+  await Promise.all([a.connect(), b.connect(), canvas.connect()]);
   await sleep(100);
   b.clear();
-  paint.clear();
+  canvas.clear();
 
   a.send({ type: 'drag-start', nodeId: 'task-1', ox: 12, oy: 8 });
   const start = await b.waitFor((m) => m.type === 'drag-start' && m.nodeId === 'task-1');
@@ -159,9 +159,9 @@ try {
   console.log('  B が drag-end を受信');
 
   await sleep(200);
-  const leaked = paint.messages.filter((m) => m.type?.startsWith('drag-'));
-  assert(leaked.length === 0, `paintルームへdragメッセージが漏れた: ${JSON.stringify(leaked)}`);
-  console.log('  別ルーム(paint)には届いていない');
+  const leaked = canvas.messages.filter((m) => m.type?.startsWith('drag-'));
+  assert(leaked.length === 0, `canvasルームへdragメッセージが漏れた: ${JSON.stringify(leaked)}`);
+  console.log('  別ルーム(canvas)には届いていない');
 
   // 存在しない nodeId は無視される
   b.clear();
@@ -170,7 +170,7 @@ try {
   assert(!b.messages.some((m) => m.type === 'drag-start'), '存在しないnodeIdのdrag-startが中継された');
   console.log('  存在しない nodeId は無視される');
 
-  paint.close();
+  canvas.close();
 
   // ---- (b) 範囲外 bx/by の丸め / 非数値は省略 ----
   console.log('\n--- (b) bx/by の丸めと無視 ---');

@@ -6,8 +6,6 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Document } from './document.js';
 import { createLLMProvider } from '../ai/LLMProvider.js';
-import { AuctionMockLLMProvider } from '../ai/AuctionMockLLMProvider.js';
-import { PaintMockLLMProvider } from '../ai/PaintMockLLMProvider.js';
 import { runAgentInstruction, AI_CLIENT_ID } from '../ai/AgentRunner.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -41,21 +39,11 @@ const httpServer = http.createServer((req, res) => {
 });
 
 // ---- ルーム(ワークスペース) --------------------------------------------
-// 元々のcanvasデモに加えて、「Human+AIが同じ操作パイプラインを共有する」という
-// アイデアを別の題材でも試した3つのおまけルームを用意している。
-// いずれも server/document.js の同じ Document クラスと、既存の
+// canvas は元々のFigma同期デモ。agent は同じ Document と
 // update-property/reparent/move-node/create-node/delete-node/select-node/
-// cursor-move / drag-start/hover/end といった既存メッセージ型をそのまま使い回しており、
-// ルーム固有の特別な同期ロジックはどこにも追加していない。
+// cursor-move / drag-start/hover/end を使い回した Kanban。
+// ルーム固有の同期ロジックは追加していない。
 // (drag-* は Document に触れないプレゼンス中継のみ)
-//
-//   canvas  : 元々のFigma同期デモ(このファイルの本編)。無変更。
-//   agent   : Kanban風のAI協働ワークスペース。
-//   auction : 複数人+AIが同じ商品に入札するデモ。bidプロパティをLWWで
-//             丸ごと上書きするだけで、金額の大小チェックは意図的にしていない。
-//   paint   : マス目=ノード、色=プロパティのピクセルキャンバス。
-//             セルの操作は既存のupdate-property/select-node/cursor-moveの
-//             使い回しだけで成立している。
 
 const AI_DISPLAY_NAME = 'AIエージェント';
 const AI_COLOR = '#f97316';
@@ -79,31 +67,6 @@ function seedAgentBoard(doc) {
   doc.createNode('task-3', 'col-doing', { type: 'task', title: 'READMEを書く' });
 }
 
-function seedAuction(doc) {
-  const items = [
-    { id: 'item-1', name: 'アンティーク時計', startBid: 1000 },
-    { id: 'item-2', name: '限定スニーカー', startBid: 3000 },
-    { id: 'item-3', name: '手作り陶器', startBid: 500 },
-  ];
-  for (const it of items) {
-    doc.createNode(it.id, 'root', {
-      type: 'item',
-      name: it.name,
-      startBid: it.startBid,
-      bid: { amount: it.startBid, bidder: null, at: null },
-    });
-  }
-}
-
-const PAINT_GRID_SIZE = 14;
-function seedPaint(doc) {
-  for (let row = 0; row < PAINT_GRID_SIZE; row++) {
-    for (let col = 0; col < PAINT_GRID_SIZE; col++) {
-      doc.createNode(`p-${row}-${col}`, 'root', { type: 'cell', row, col, color: '#2a2a2a' });
-    }
-  }
-}
-
 function resetDocInPlace(doc) {
   doc.nodes.clear();
   doc.nodes.set(doc.rootId, { id: doc.rootId, parentId: null, order: null, properties: { name: 'Root' } });
@@ -124,23 +87,16 @@ function createRoom(name, seedFn) {
 const rooms = {
   canvas: createRoom('canvas', seedCanvas),
   agent: createRoom('agent', seedAgentBoard),
-  auction: createRoom('auction', seedAuction),
-  paint: createRoom('paint', seedPaint),
 };
 
 // AI_MODE=mock (デフォルト、APIキー不要) / AI_MODE=live (要ANTHROPIC_API_KEY) はKanbanのみ。
-// おまけの2ルームは題材が単純なので、専用の決定的なモックのみを提供している。
 const kanbanProvider = await createLLMProvider();
 const aiProviders = {
   agent: kanbanProvider,
-  auction: new AuctionMockLLMProvider(),
-  paint: new PaintMockLLMProvider(),
 };
 
 const ROOM_PATH_PREFIXES = {
   '/ws-agent': 'agent',
-  '/ws-auction': 'auction',
-  '/ws-paint': 'paint',
 };
 
 function roomForRequest(req) {
@@ -372,6 +328,4 @@ httpServer.listen(PORT, () => {
   console.log(`[server] http/ws listening on http://localhost:${PORT}`);
   console.log(`[server] canvas demo:        http://localhost:${PORT}/`);
   console.log(`[server] agent workspace:    http://localhost:${PORT}/agent.html`);
-  console.log(`[server] auction demo:       http://localhost:${PORT}/auction.html`);
-  console.log(`[server] paint canvas demo:  http://localhost:${PORT}/paint.html`);
 });
