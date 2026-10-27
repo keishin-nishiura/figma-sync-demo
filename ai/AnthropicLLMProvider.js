@@ -4,7 +4,7 @@ import { LLMProvider } from './LLMProvider.js';
 // 実LLM版のプロバイダー。Node標準のfetchのみを使い、追加の依存関係を増やさない。
 // APIキーはサーバー側の環境変数からしか読まず、ブラウザに渡ることは無い。
 const API_URL = 'https://api.anthropic.com/v1/messages';
-const MODEL = process.env.ANTHROPIC_MODEL || 'claude-3-5-haiku-20241022';
+const MODEL = process.env.ANTHROPIC_MODEL || 'claude-haiku-5-5';
 
 const SYSTEM_PROMPT = `あなたはKanbanボード(Column配下にTaskを持つツリー構造)を操作するAIエージェントです。
 ユーザーの自然言語の指示と、現在のボードのスナップショット(JSON)を受け取り、

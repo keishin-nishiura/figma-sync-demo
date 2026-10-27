@@ -154,7 +154,7 @@ npm run server
 |---|---|
 | `AI_MODE` | `mock` (デフォルト) はルールベースの決定的な動作。`live` にすると実際のLLMを呼び出す |
 | `ANTHROPIC_API_KEY` | `AI_MODE=live` のときのみ使用。サーバー側の環境変数としてのみ読み込まれ、ブラウザには一切送信されない |
-| `ANTHROPIC_MODEL` | 任意。`AI_MODE=live` 時に使うモデル名 (デフォルト: `claude-3-5-haiku-20241022`) |
+| `ANTHROPIC_MODEL` | 任意。`AI_MODE=live` 時に使うモデル名 (デフォルト: `claude-haiku-5-5`) |
 
 `AI_MODE=live` を指定していても `ANTHROPIC_API_KEY` が無い場合は、自動的に
 モックプロバイダーにフォールバックします(公開デモを誰でもAPIコスト無しで
