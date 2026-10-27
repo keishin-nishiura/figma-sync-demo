@@ -12,6 +12,8 @@
     "scenario:fractional-index": "node scenarios/04-fractional-index-reorder.js",
     "scenario:drag-presence": "node scenarios/05-agent-drag-presence.js"
   },
+  "author": "Keishin Nishiura",
+  "repository": "https://github.com/keishin-nishiura/figma-sync-demo",
   "license": "MIT",
   "dependencies": {
     "ws": "^8.18.0"
