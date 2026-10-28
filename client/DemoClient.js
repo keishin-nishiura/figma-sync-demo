@@ -53,6 +53,12 @@ export class DemoClient {
         const node = this.nodes.get(msg.nodeId);
         if (!node) break;
         const wasPending = this.pendingOps.has(msg.opId);
+        if (!wasPending && this.hasPendingPropertyUpdate(msg.nodeId, msg.key)) {
+          this.log(
+            `無視 (未確定の自分の更新あり): ${msg.nodeId}.${msg.key} = ${JSON.stringify(msg.value)}`
+          );
+          break;
+        }
         node.properties[msg.key] = msg.value;
         this.pendingOps.delete(msg.opId);
         if (wasPending) {
@@ -120,13 +126,22 @@ export class DemoClient {
     }
   }
 
+  hasPendingPropertyUpdate(nodeId, key) {
+    for (const pending of this.pendingOps.values()) {
+      if (pending.type === 'update-property' && pending.nodeId === nodeId && pending.key === key) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   // 楽観的更新: ローカルに即時反映してから送信する
   updateProperty(nodeId, key, value) {
     const node = this.nodes.get(nodeId);
     if (!node) return;
     const opId = this.nextOpId();
     node.properties[key] = value; // 即時反映
-    this.pendingOps.set(opId, { type: 'update-property' });
+    this.pendingOps.set(opId, { type: 'update-property', nodeId, key });
     this.log(`楽観的に適用: ${nodeId}.${key} = ${JSON.stringify(value)}`);
     this.ws.send(JSON.stringify({ type: 'update-property', nodeId, key, value, opId }));
   }

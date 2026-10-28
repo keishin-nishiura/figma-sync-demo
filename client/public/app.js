@@ -99,6 +99,14 @@ function handleMessage(msg) {
       const node = state.nodes.get(msg.nodeId);
       if (!node) break;
       const wasPending = state.pending.has(msg.opId);
+      if (
+        !wasPending &&
+        flickerPreventionEnabled &&
+        hasPendingPropertyUpdate(msg.nodeId, msg.key)
+      ) {
+        log('remote', `無視 (未確定の自分の更新あり): ${msg.nodeId}.${msg.key} = ${JSON.stringify(msg.value)}`);
+        break;
+      }
       node.properties[msg.key] = msg.value;
       state.pending.delete(msg.opId);
       if (wasPending && flickerPreventionEnabled) {
@@ -211,12 +219,21 @@ function flashRejected(nodeId) {
 
 // ---- 操作 (すべて楽観的更新: ローカルに即時反映してから送信する) ----
 
+function hasPendingPropertyUpdate(nodeId, key) {
+  for (const pending of state.pending.values()) {
+    if (pending.type === 'update-property' && pending.nodeId === nodeId && pending.key === key) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function updateProperty(nodeId, key, value) {
   const node = state.nodes.get(nodeId);
   if (!node) return;
   const opId = nextOpId();
   node.properties[key] = value;
-  state.pending.set(opId, { type: 'update-property' });
+  state.pending.set(opId, { type: 'update-property', nodeId, key });
   log('opt', `楽観的に適用: ${nodeId}.${key} = ${JSON.stringify(value)}`);
   send({ type: 'update-property', nodeId, key, value, opId });
 }
@@ -482,10 +499,10 @@ function onDrag(e) {
 
 function sendPositionUpdate(nodeId, x, y) {
   const opIdX = nextOpId();
-  state.pending.set(opIdX, { type: 'update-property' });
+  state.pending.set(opIdX, { type: 'update-property', nodeId, key: 'x' });
   send({ type: 'update-property', nodeId, key: 'x', value: x, opId: opIdX });
   const opIdY = nextOpId();
-  state.pending.set(opIdY, { type: 'update-property' });
+  state.pending.set(opIdY, { type: 'update-property', nodeId, key: 'y' });
   send({ type: 'update-property', nodeId, key: 'y', value: y, opId: opIdY });
 }
 
